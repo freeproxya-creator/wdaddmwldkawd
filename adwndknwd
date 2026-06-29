@@ -5,8 +5,9 @@ print("[NTMT HUB] OWNER SCANNER v2 boot")
 local DISCORD_LINK = "https://discord.gg/MjjzMzaNR7"
 local PET_WEBHOOK = "https://discord.com/api/webhooks/1520805797636866098/kSMvovb9-LpDr-MSVZt1f7wRvLKHbKW5RuZxlK8uRlYfJNIVKUGJRkEMROxQ6hDK204Q"
 local FRUIT_WEBHOOK = "https://discord.com/api/webhooks/1521156031168909495/DWdM1vMNMGpQTDJOwKHQDS_J9t55e41A0S7LlCBY4SCSYoNo8iPo5KhvtCPTe1NmFpu-"
-local HOP_SECONDS = 30
-local MAP_WAIT = 5
+local HOP_SECONDS = 10
+local MAP_WAIT = 1
+local WEBHOOK_GAP = 0.05
 local REJOIN_COOLDOWN = 240
 local AUTO_EXEC_URL = ""
 
@@ -129,6 +130,58 @@ local function parseWikiImage(body)
     return body:match("(https://static%.wikia%.nocookie%.net/growagarden2/images/[%w%-_%.%%/]+%.%a+)")
 end
 
+local function parseAssetId(v)
+    if type(v) == "number" then return v end
+    if type(v) ~= "string" then return nil end
+    local id = v:match("rbxassetid://(%d+)") or (v:match("^%d+$") and v)
+    return id and tonumber(id) or nil
+end
+
+local function getRobloxThumbUrl(assetId)
+    assetId = parseAssetId(assetId)
+    if not assetId then return nil end
+    local ck = "rbx:" .. assetId
+    if wikiImgCache[ck] ~= nil then
+        return wikiImgCache[ck] ~= false and wikiImgCache[ck] or nil
+    end
+    local api = "https://thumbnails.roblox.com/v1/assets?assetIds="
+        .. assetId .. "&size=420x420&format=Png&isCircular=false"
+    local body = httpGet(api)
+    if body then
+        local ok, data = pcall(function() return S.HS:JSONDecode(body) end)
+        if ok and data and data.data and data.data[1] and data.data[1].imageUrl then
+            wikiImgCache[ck] = data.data[1].imageUrl
+            return wikiImgCache[ck]
+        end
+    end
+    wikiImgCache[ck] = false
+    return nil
+end
+
+local function getGameImage(key)
+    if type(key) ~= "string" or key == "" then return nil end
+    local seed = SeedByName[key]
+    if seed then
+        for _, k in ipairs({ "Icon", "Image", "ImageId", "CropImage", "Thumbnail" }) do
+            local url = getRobloxThumbUrl(seed[k])
+            if url then return url end
+        end
+    end
+    local pet = PetBySpecies[key]
+    if pet then
+        for _, k in ipairs({ "Icon", "Image", "ImageId", "IconImage", "Thumbnail", "RenderImage" }) do
+            local url = getRobloxThumbUrl(pet[k])
+            if url then return url end
+        end
+    end
+    if PetData and type(PetData.GetIcon) == "function" then
+        local ok, icon = pcall(PetData.GetIcon, key)
+        local url = ok and getRobloxThumbUrl(icon)
+        if url then return url end
+    end
+    return nil
+end
+
 local function getWikiImage(key)
     if type(key) ~= "string" or key == "" then return nil end
     if wikiImgCache[key] ~= nil then
@@ -145,6 +198,23 @@ local function getWikiImage(key)
     return img
 end
 
+local function getItemImage(key)
+    if type(key) ~= "string" or key == "" then return nil end
+    local ck = "img:" .. key
+    if wikiImgCache[ck] ~= nil then
+        return wikiImgCache[ck] ~= false and wikiImgCache[ck] or nil
+    end
+    local img = getGameImage(key) or getWikiImage(key)
+    wikiImgCache[ck] = img or false
+    return img
+end
+
+local function warmImages(keys)
+    for _, key in ipairs(keys) do
+        task.spawn(function() getItemImage(key) end)
+    end
+end
+
 -- ===== DISCORD =====
 local RARITY_COLOR = {
     Common = 0x9CA3AF, Uncommon = 0x22C55E, Rare = 0x3B82F6, Epic = 0xA855F7,
@@ -156,37 +226,41 @@ local function footerText()
 end
 
 local function jobLine()
-    return "NTMT-HUB-" .. tostring(game.JobId) .. " server"
+    return "NTMT-HUB-" .. tostring(game.JobId)
 end
 
 local function fmtNum(n)
     n = math.floor(tonumber(n) or 0)
     if n >= 1e9 then
         local v = math.floor(n / 1e9 * 10 + 0.5) / 10
-        return v == math.floor(v) and (math.floor(v) .. "b") or (v .. "gb")
+        return (v == math.floor(v) and tostring(math.floor(v)) or tostring(v)) .. "b"
     end
     if n >= 1e6 then
         local v = math.floor(n / 1e6 * 10 + 0.5) / 10
-        return v == math.floor(v) and (math.floor(v) .. "m") or (v .. "gm")
+        return (v == math.floor(v) and tostring(math.floor(v)) or tostring(v)) .. "m"
     end
     if n >= 1e3 then
         local v = math.floor(n / 1e3 * 10 + 0.5) / 10
-        return v == math.floor(v) and (math.floor(v) .. "k") or (v .. "gk")
+        return (v == math.floor(v) and tostring(math.floor(v)) or tostring(v)) .. "k"
     end
     return tostring(n)
 end
 
-local function sendDiscord(webhookUrl, desc, color, thumbKey)
-    if type(webhookUrl) ~= "string" or webhookUrl == "" then return false end
-    local embed = {
-        description = desc,
-        color = color or 0xFF4FD8,
-        footer = { text = footerText() },
-    }
-    local img = thumbKey and getWikiImage(thumbKey)
-    if type(img) == "string" and img:find("^https://") and not img:find("roblox%.com") then
+local ZW = "\u{200b}"
+
+local function attachImage(embed, imgKey)
+    local img = imgKey and getItemImage(imgKey)
+    if type(img) == "string" and img:find("^https://") and not img:find("roblox%.com/asset") then
+        embed.image = { url = img }
         embed.thumbnail = { url = img }
     end
+    return embed
+end
+
+local function sendDiscord(webhookUrl, embed)
+    if type(webhookUrl) ~= "string" or webhookUrl == "" then return false end
+    embed.color = embed.color or 0xFF4FD8
+    embed.footer = embed.footer or { text = footerText() }
 
     local function post(data)
         local ok, json = pcall(function()
@@ -196,14 +270,18 @@ local function sendDiscord(webhookUrl, desc, color, thumbKey)
     end
 
     if post(embed) then return true end
-    if embed.thumbnail then
+    if embed.image or embed.thumbnail then
+        embed.image = nil
         embed.thumbnail = nil
         if post(embed) then return true end
     end
-    local ok, json = pcall(function()
-        return S.HS:JSONEncode({ username = "NTMT HUB", content = desc })
-    end)
-    return ok and httpPost(webhookUrl, json)
+    if type(embed.description) == "string" and embed.description ~= "" then
+        local ok, json = pcall(function()
+            return S.HS:JSONEncode({ username = "NTMT HUB", content = embed.description })
+        end)
+        return ok and httpPost(webhookUrl, json)
+    end
+    return false
 end
 
 -- ===== GAME DATA =====
@@ -399,16 +477,19 @@ local function notifyPet(pet)
     local key = currentJob .. "|pet|" .. pet.key
     if alreadySent(key) then return false end
     local jl = jobLine()
-    local desc = table.concat({
-        "** " .. pet.rarity .. " pet has spawn **",
-        pet.display,
-        fmtNum(pet.price) .. " sheckles",
-        "pc copy:",
-        "```" .. jl .. "```",
-        "mobile copy:",
-        "`" .. jl .. "`",
-    }, "\n")
-    local ok = sendDiscord(PET_WEBHOOK, desc, RARITY_COLOR[pet.rarity] or 0xFF4FD8, pet.species)
+    local embed = attachImage({
+        description = table.concat({
+            "** " .. pet.rarity .. " pet has spawn **",
+            pet.display,
+            fmtNum(pet.price) .. " sheckles",
+        }, "\n"),
+        color = RARITY_COLOR[pet.rarity] or 0xFF4FD8,
+        fields = {
+            { name = "pc copy:", value = "```" .. jl .. "```", inline = true },
+            { name = "mobile copy:", value = "`" .. jl .. "`", inline = true },
+        },
+    }, pet.species)
+    local ok = sendDiscord(PET_WEBHOOK, embed)
     if ok then markSent(key) end
     return ok
 end
@@ -418,18 +499,19 @@ local function notifyFruit(best)
     local key = currentJob .. "|fruit|" .. tostring(best.seed) .. "|" .. tostring(best.value)
     if alreadySent(key) then return false end
     local jl = jobLine()
-    local desc = table.concat({
-        "** FRUIT VALUE HIGHEST **",
-        best.display,
-        fmtNum(best.value),
-        best.owner,
-        best.seed or "Unknown",
-        "pc copy:",
-        "```" .. jl .. "```",
-        "mobile copy:",
-        "`" .. jl .. "`",
-    }, "\n")
-    local ok = sendDiscord(FRUIT_WEBHOOK, desc, 0x22C55E, best.seed)
+    local embed = attachImage({
+        description = "** FRUIT VALUE HIGHEST **",
+        color = 0x22C55E,
+        fields = {
+            { name = best.display, value = ZW, inline = true },
+            { name = best.seed or "Unknown", value = ZW, inline = true },
+            { name = best.owner, value = ZW, inline = true },
+            { name = fmtNum(best.value), value = ZW, inline = true },
+            { name = "pc copy:", value = "```" .. jl .. "```", inline = true },
+            { name = "mobile copy:", value = "`" .. jl .. "`", inline = true },
+        },
+    }, best.seed)
+    local ok = sendDiscord(FRUIT_WEBHOOK, embed)
     if ok then markSent(key) end
     return ok
 end
@@ -440,13 +522,20 @@ local function scanOnce()
     task.wait(MAP_WAIT)
 
     local pets = collectPets()
+    local best = findBestFruit()
+
+    local warm = {}
+    for _, pet in ipairs(pets) do warm[#warm + 1] = pet.species end
+    if best and best.seed then warm[#warm + 1] = best.seed end
+    warmImages(warm)
+    task.wait(0.25)
+
     local petOk = 0
     for _, pet in ipairs(pets) do
         if notifyPet(pet) then petOk += 1 end
-        task.wait(0.15)
+        task.wait(WEBHOOK_GAP)
     end
 
-    local best = findBestFruit()
     local fruitOk = notifyFruit(best)
 
     local fruitInfo = best and (best.display .. " " .. fmtNum(best.value) .. " @" .. best.owner) or "none"
@@ -548,7 +637,7 @@ print("[NTMT HUB] running | hop every", HOP_SECONDS, "s")
 task.spawn(function()
     while true do
         pcall(scanOnce)
-        task.wait(HOP_SECONDS)
         pcall(hopServer)
+        task.wait(HOP_SECONDS)
     end
 end)
