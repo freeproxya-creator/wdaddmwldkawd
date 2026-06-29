@@ -7,7 +7,7 @@ local FRUIT_WEBHOOK_URL = "https://discord.com/api/webhooks/1521156031168909495/
 local HOP_INTERVAL = 30
 local VISITED_REJOIN_AFTER = 240
 local AUTO_EXEC_URL = ""
-local MAP_LOAD_WAIT = 2
+local MAP_LOAD_WAIT = 4
 
 local genv = _G
 if type(getgenv) == "function" then
@@ -67,10 +67,13 @@ local function isDiscordSafeImageUrl(url)
     return url:find("^https://") ~= nil
 end
 
+local webhookHttpWarned = false
+
 local function postDiscordWebhook(webhookUrl, embed)
+    local hs = game:GetService("HttpService")
     local function trySend(data)
         local ok, payload = xpcall(function()
-            return Services.HttpService:JSONEncode({
+            return hs:JSONEncode({
                 username = "NTMT HUB",
                 embeds = { data },
             })
@@ -85,7 +88,20 @@ local function postDiscordWebhook(webhookUrl, embed)
             color = embed.color,
             footer = embed.footer,
         }
-        return trySend(fallback)
+        if trySend(fallback) then return true end
+    end
+    if type(embed.description) == "string" and embed.description ~= "" then
+        local ok, payload = xpcall(function()
+            return hs:JSONEncode({
+                username = "NTMT HUB",
+                content = embed.description,
+            })
+        end, noopErr)
+        if ok and type(payload) == "string" and httpPost(webhookUrl, payload) then return true end
+    end
+    if not webhookHttpWarned then
+        webhookHttpWarned = true
+        warn("[NTMT HUB] Webhook HTTP failed — executor can need request() or game:HttpPost")
     end
     return false
 end
@@ -111,27 +127,40 @@ local function httpPost(url, body)
     local req = request or (syn and syn.request) or (http and http.request) or http_request
     if fluxus and fluxus.request then req = fluxus.request end
     if type(req) == "function" then
-        local ok, res = xpcall(function()
-            return req({ Url = url, Method = "POST", Headers = headers, Body = body })
-        end, noopErr)
-        if ok then
-            if res == true or res == nil then return true end
-            local code = res and (res.StatusCode or res.status or res.Status)
-            if type(code) == "number" then return code >= 200 and code < 400 end
-            return true
+        for _, opts in ipairs({
+            { Url = url, Method = "POST", Headers = headers, Body = body },
+            { url = url, method = "POST", headers = headers, body = body },
+        }) do
+            local ok, res = xpcall(function() return req(opts) end, noopErr)
+            if ok then
+                if res == true or res == nil then return true end
+                if type(res) == "table" then
+                    if res.Success == false or res.success == false then continue end
+                    local code = res.StatusCode or res.status or res.Status
+                    if type(code) == "number" then return code >= 200 and code < 400 end
+                end
+                return true
+            end
         end
     end
     if http and type(http.post) == "function" then
         local ok = xpcall(function() http.post(url, body, "application/json") end, noopErr)
         if ok then return true end
     end
-    local hs = Services and Services.HttpService or game:GetService("HttpService")
+    if type(game.HttpPost) == "function" then
+        local ok, res = xpcall(function()
+            return game:HttpPost(url, body, Enum.HttpContentType.ApplicationJson, false)
+        end, noopErr)
+        if ok and (res == nil or res == true or (type(res) == "string" and #res > 0)) then return true end
+    end
+    local hs = game:GetService("HttpService")
     if hs then
         local ok, res = xpcall(function()
             return hs:RequestAsync({ Url = url, Method = "POST", Headers = headers, Body = body })
         end, noopErr)
-        if ok and res and type(res.StatusCode) == "number" then
-            return res.StatusCode >= 200 and res.StatusCode < 400
+        if ok and type(res) == "table" then
+            if res.Success == true then return true end
+            if type(res.StatusCode) == "number" and res.StatusCode >= 200 and res.StatusCode < 400 then return true end
         end
         ok = xpcall(function()
             hs:PostAsync(url, body, Enum.HttpContentType.ApplicationJson, false)
@@ -807,3 +836,11 @@ LocalPlayer.Idled:Connect(function()
 end)
 
 print("[NTMT HUB] OWNER SCANNER running | scan on join + hop every", HOP_INTERVAL, "s")
+do
+    local methods = {}
+    if type(request) == "function" then methods[#methods + 1] = "request" end
+    if syn and type(syn.request) == "function" then methods[#methods + 1] = "syn.request" end
+    if http and type(http.request) == "function" then methods[#methods + 1] = "http.request" end
+    if type(game.HttpPost) == "function" then methods[#methods + 1] = "game:HttpPost" end
+    print("[NTMT HUB] Webhook HTTP:", #methods > 0 and table.concat(methods, ", ") or "NONE — webhook se khong gui duoc")
+end
