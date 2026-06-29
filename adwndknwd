@@ -43,13 +43,9 @@ if type(genv.ntmt_owner_visited) == "table" then
         end
     end
 end
-if type(genv.ntmt_owner_notified) == "table" then
-    for key, ts in genv.ntmt_owner_notified do
-        if type(key) == "string" and type(ts) == "number" then
-            notifiedKeys[key] = ts
-        end
-    end
-end
+-- notifiedKeys chi dung trong session, khong load tu genv (tranh block webhook)
+
+genv.ntmt_owner_notified = nil
 
 local RARITY_COLORS = {
     Common = 0x9CA3AF,
@@ -63,7 +59,35 @@ local RARITY_COLORS = {
 
 local function syncStateToGenv()
     genv.ntmt_owner_visited = visitedServers
-    genv.ntmt_owner_notified = notifiedKeys
+end
+
+local function isDiscordSafeImageUrl(url)
+    if type(url) ~= "string" or url == "" then return false end
+    if url:find("roblox%.com/asset") then return false end
+    return url:find("^https://") ~= nil
+end
+
+local function postDiscordWebhook(webhookUrl, embed)
+    local function trySend(data)
+        local ok, payload = xpcall(function()
+            return Services.HttpService:JSONEncode({
+                username = "NTMT HUB",
+                embeds = { data },
+            })
+        end, noopErr)
+        if not ok or type(payload) ~= "string" then return false end
+        return httpPost(webhookUrl, payload)
+    end
+    if trySend(embed) then return true end
+    if embed.thumbnail then
+        local fallback = {
+            description = embed.description,
+            color = embed.color,
+            footer = embed.footer,
+        }
+        return trySend(fallback)
+    end
+    return false
 end
 
 local function universalHttpGet(url)
@@ -97,9 +121,19 @@ local function httpPost(url, body)
             return true
         end
     end
-    local hs = game:GetService("HttpService")
+    if http and type(http.post) == "function" then
+        local ok = xpcall(function() http.post(url, body, "application/json") end, noopErr)
+        if ok then return true end
+    end
+    local hs = Services and Services.HttpService or game:GetService("HttpService")
     if hs then
-        local ok = xpcall(function()
+        local ok, res = xpcall(function()
+            return hs:RequestAsync({ Url = url, Method = "POST", Headers = headers, Body = body })
+        end, noopErr)
+        if ok and res and type(res.StatusCode) == "number" then
+            return res.StatusCode >= 200 and res.StatusCode < 400
+        end
+        ok = xpcall(function()
             hs:PostAsync(url, body, Enum.HttpContentType.ApplicationJson, false)
         end, noopErr)
         if ok then return true end
@@ -203,7 +237,6 @@ end
 
 local function markNotified(key)
     notifiedKeys[key] = os.time()
-    syncStateToGenv()
 end
 
 markVisited(currentJobId)
@@ -355,7 +388,7 @@ local function assetIdToThumbUrl(assetId)
     local fallback = "https://www.roblox.com/asset-thumbnail/image?assetId="
         .. assetId .. "&width=420&height=420&format=png"
     thumbCache[cacheKey] = fallback
-    return fallback
+    return nil
 end
 
 local function getPetImageUrl(species, model)
@@ -420,7 +453,6 @@ local function collectAllPets()
             displayName = getPetDisplayName(species, size),
             rarity = getPetRarity(species),
             price = ref:GetAttribute("Price") or (model and model:GetAttribute("Price")) or 0,
-            imageUrl = getPetImageUrl(species, model),
         }
     end
     if WildPetFolder then
@@ -469,14 +501,12 @@ local function sendPetWebhook(entry)
             text = "made by NTMT HUB | " .. DISCORD_LINK .. " • " .. os.date("%d/%m/%Y %H:%M"),
         },
     }
-    if entry.imageUrl then
-        embed.thumbnail = { url = entry.imageUrl }
+    local imageUrl = getPetImageUrl(entry.species, entry.model)
+    if isDiscordSafeImageUrl(imageUrl) then
+        embed.thumbnail = { url = imageUrl }
     end
 
-    local ok = httpPost(PET_WEBHOOK_URL, Services.HttpService:JSONEncode({
-        username = "NTMT HUB",
-        embeds = { embed },
-    }))
+    local ok = postDiscordWebhook(PET_WEBHOOK_URL, embed)
     if ok then markNotified(notifyKey) end
     return ok
 end
@@ -583,14 +613,11 @@ local function sendFruitWebhook(best)
     }
 
     local imageUrl = getFruitImageUrl(best.fruitName)
-    if imageUrl then
+    if isDiscordSafeImageUrl(imageUrl) then
         embed.thumbnail = { url = imageUrl }
     end
 
-    local ok = httpPost(FRUIT_WEBHOOK_URL, Services.HttpService:JSONEncode({
-        username = "NTMT HUB",
-        embeds = { embed },
-    }))
+    local ok = postDiscordWebhook(FRUIT_WEBHOOK_URL, embed)
     if ok then markNotified(notifyKey) end
     return ok
 end
@@ -616,8 +643,14 @@ end
 local function scanServerAndNotify()
     initMapFolders()
     task.wait(MAP_LOAD_WAIT)
-    local petSent, petTotal = scanPetsAndNotify()
-    local fruitSent, bestFruit = scanFruitAndNotify()
+    local petSent, petTotal = 0, 0
+    local fruitSent, bestFruit = false, nil
+    xpcall(function()
+        petSent, petTotal = scanPetsAndNotify()
+    end, noopErr)
+    xpcall(function()
+        fruitSent, bestFruit = scanFruitAndNotify()
+    end, noopErr)
     return petSent, petTotal, fruitSent, bestFruit
 end
 
@@ -742,9 +775,15 @@ task.defer(function()
     pcall(setupAutoExecute)
 end)
 
+local lastScanJobId = ""
+
 task.spawn(function()
     while true do
         currentJobId = tostring(game.JobId)
+        if currentJobId ~= lastScanJobId then
+            table.clear(notifiedKeys)
+            lastScanJobId = currentJobId
+        end
         local petSent, petTotal, fruitSent, bestFruit = scanServerAndNotify()
         local fruitInfo = bestFruit
             and (bestFruit.displayName .. " " .. formatCompactNumber(bestFruit.value) .. " @" .. bestFruit.ownerName)
