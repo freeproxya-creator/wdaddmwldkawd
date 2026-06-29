@@ -7,8 +7,11 @@ local PET_WEBHOOK = "https://discord.com/api/webhooks/1520805797636866098/kSMvov
 local FRUIT_WEBHOOK = "https://discord.com/api/webhooks/1521156031168909495/DWdM1vMNMGpQTDJOwKHQDS_J9t55e41A0S7LlCBY4SCSYoNo8iPo5KhvtCPTe1NmFpu-"
 local HOP_SECONDS = 15
 local MAP_WAIT = 3
+local GARDEN_SYNC_WAIT = 2
 local WEBHOOK_GAP = 0.1
 local REJOIN_COOLDOWN = 240
+local MIN_PLAYERS = 4
+local HOP_COOLDOWN = 8
 local AUTO_EXEC_URL = ""
 
 -- ===== GUARD =====
@@ -39,8 +42,58 @@ local S = {
     VU = cloneref(game:GetService("VirtualUser")),
 }
 
+local hoppingBusy = false
+local lastHopAt = 0
+local lastTapAt = 0
+local tapRunning = false
+local imageFetchBusy = 0
+local MAX_IMAGE_FETCH = 2
+
+local function safeRun(label, fn)
+    local ok, err = pcall(fn)
+    if not ok then warn("[NTMT HUB]", label, errMsg(err)) end
+    return ok
+end
+
 local LP = S.Players.LocalPlayer or S.Players.PlayerAdded:Wait()
 repeat task.wait() until game:IsLoaded()
+
+local function tapJoinScreen()
+    if tapRunning then return end
+    local now = os.clock()
+    if now - lastTapAt < 2 then return end
+    tapRunning = true
+    lastTapAt = now
+    safeRun("tapJoin", function()
+        local vu = S.VU
+        if not vu then return end
+        local pos = Vector2.new(400, 300)
+        for _ = 1, 2 do
+            pcall(function()
+                vu:CaptureController()
+                vu:ClickButton2(pos)
+            end)
+            task.wait(0.2)
+        end
+    end)
+    tapRunning = false
+end
+
+task.defer(function()
+    task.wait(1.5)
+    tapJoinScreen()
+end)
+
+LP.CharacterAdded:Connect(function()
+    task.delay(1, tapJoinScreen)
+end)
+
+LP.OnTeleport:Connect(function(state)
+    if state == Enum.TeleportState.GameFullLoaded then
+        hoppingBusy = false
+        task.delay(0.8, tapJoinScreen)
+    end
+end)
 
 -- ===== HTTP (same as main NTMT script) =====
 local function httpGet(url)
@@ -84,17 +137,6 @@ local function httpPost(url, body)
             game:HttpPost(url, body, Enum.HttpContentType.ApplicationJson, false)
         end)
         if ok then return true end
-    end
-    local ok = pcall(function()
-        S.HS:PostAsync(url, body, Enum.HttpContentType.ApplicationJson, false)
-    end)
-    if ok then return true end
-    local ok2, res = pcall(function()
-        return S.HS:RequestAsync({ Url = url, Method = "POST", Headers = headers, Body = body })
-    end)
-    if ok2 and type(res) == "table" then
-        if res.Success == true then return true end
-        if type(res.StatusCode) == "number" and res.StatusCode >= 200 and res.StatusCode < 400 then return true end
     end
     return false
 end
@@ -223,7 +265,15 @@ end
 
 local function fetchImageAsync(key)
     if type(key) ~= "string" or key == "" then return end
-    task.spawn(function() getItemImage(key) end)
+    if imageFetchBusy >= MAX_IMAGE_FETCH then return end
+    if wikiImgCache["img:" .. key] ~= nil then return end
+    imageFetchBusy += 1
+    task.spawn(function()
+        safeRun("fetchImage", function()
+            getItemImage(key)
+        end)
+        imageFetchBusy -= 1
+    end)
 end
 
 -- ===== DISCORD =====
@@ -327,6 +377,7 @@ local function safeRequire(m)
 end
 
 local Shared = S.RS:WaitForChild("SharedModules", 60)
+local Net = Shared and safeRequire(Shared:WaitForChild("Networking"))
 local PetData = safeRequire(S.RS.SharedData:WaitForChild("PetData"))
 local FruitValueCalc = Shared and safeRequire(Shared:WaitForChild("FruitValueCalc"))
 local SeedData = Shared and safeRequire(Shared:WaitForChild("SeedData"))
@@ -348,6 +399,41 @@ if type(SeedData) == "table" then
             SeedByName[info.SeedName] = info
         end
     end
+end
+
+local function safeNetCall(remote, ...)
+    if not remote then return false end
+    local args = { ... }
+    if type(remote.Fire) == "function" then
+        return pcall(function() remote:Fire(table.unpack(args)) end)
+    end
+    if type(remote.FireServer) == "function" then
+        return pcall(function() remote:FireServer(table.unpack(args)) end)
+    end
+    if type(remote.InvokeServer) == "function" then
+        return pcall(function() return remote:InvokeServer(table.unpack(args)) end)
+    end
+    if type(remote.Invoke) == "function" then
+        return pcall(function() return remote:Invoke(table.unpack(args)) end)
+    end
+    return false
+end
+
+local function syncServerGardens()
+    safeNetCall(Net and Net.Garden and Net.Garden.RequestGardens)
+    task.wait(GARDEN_SYNC_WAIT)
+    safeNetCall(Net and Net.Garden and Net.Garden.RequestGardens)
+    task.wait(0.8)
+end
+
+local function countGardenPlotsWithPlants()
+    if not Gardens then return 0 end
+    local n = 0
+    for _, plot in Gardens:GetChildren() do
+        local plants = plot:FindFirstChild("Plants")
+        if plants and #plants:GetChildren() > 0 then n += 1 end
+    end
+    return n
 end
 
 local function initMap()
@@ -435,41 +521,84 @@ local function fruitDisplayName(seedName)
     return seedName or "Unknown"
 end
 
-local function fruitValue(fruit)
+local function fruitValue(fruit, plot)
     if not fruit or not FruitValueCalc then return 0 end
     local name = fruitSeedName(fruit)
     if not name then return 0 end
+    local calcPlr = LP
+    if plot then
+        local uid = plot:GetAttribute("OwnerUserId")
+        if uid then
+            local plr = S.Players:GetPlayerByUserId(tonumber(uid) or uid)
+            if plr then calcPlr = plr end
+        end
+    end
     local ok, val = pcall(FruitValueCalc, name,
         fruit:GetAttribute("SizeMulti") or fruit:GetAttribute("Age"),
-        fruit:GetAttribute("Mutation"), LP, 1)
+        fruit:GetAttribute("Mutation"), calcPlr, 1)
     return ok and (tonumber(val) or 0) or 0
 end
+
+local ownerNameCache = {}
 
 local function plotOwner(plot)
     if not plot then return "Unknown" end
     local owner = plot:GetAttribute("Owner")
     if type(owner) == "string" and owner ~= "" then return owner end
     local uid = plot:GetAttribute("OwnerUserId")
-    if uid then
-        local plr = S.Players:GetPlayerByUserId(tonumber(uid) or uid)
-        if plr then return plr.Name end
+    local nuid = uid and tonumber(uid)
+    if nuid and nuid > 0 then
+        if ownerNameCache[nuid] then return ownerNameCache[nuid] end
+        local plr = S.Players:GetPlayerByUserId(nuid)
+        if plr then
+            ownerNameCache[nuid] = plr.Name
+            return plr.Name
+        end
+        local ok, name = pcall(S.Players.GetNameFromUserIdAsync, S.Players, nuid)
+        if ok and type(name) == "string" and name ~= "" then
+            ownerNameCache[nuid] = name
+            return name
+        end
+        ownerNameCache[nuid] = "User_" .. tostring(nuid)
+        return ownerNameCache[nuid]
     end
     return "Unknown"
+end
+
+local function iterPlotFruits(plot)
+    local out = {}
+    local plants = plot:FindFirstChild("Plants")
+    if not plants then return out end
+    for _, plant in plants:GetChildren() do
+        local fruits = plant:FindFirstChild("Fruits")
+        if fruits then
+            for _, fruit in fruits:GetChildren() do
+                if fruit and fruit.Parent then out[#out + 1] = fruit end
+            end
+        else
+            if plant:GetAttribute("CorePartName") or plant:GetAttribute("PlantName")
+                or plant:GetAttribute("FruitName") or plant:FindFirstChildWhichIsA("BasePart", true) then
+                out[#out + 1] = plant
+            end
+        end
+    end
+    return out
 end
 
 local function findBestFruit()
     if not Gardens then return nil end
     local best
-    for _, plot in Gardens:GetChildren() do
-        local plants = plot:FindFirstChild("Plants")
-        if not plants then continue end
-        local owner = plotOwner(plot)
-        for _, plant in plants:GetChildren() do
-            local fruits = plant:FindFirstChild("Fruits")
-            local scan = fruits and fruits:GetChildren() or { plant }
-            for _, fruit in scan do
-                if not fruit or not fruit.Parent then continue end
-                local val = fruitValue(fruit)
+    local plotsScanned, fruitsChecked = 0, 0
+    safeRun("findBestFruit", function()
+        for _, plot in Gardens:GetChildren() do
+            local fruits = iterPlotFruits(plot)
+            if #fruits == 0 then continue end
+            plotsScanned += 1
+            local owner = plotOwner(plot)
+            for _, fruit in ipairs(fruits) do
+                fruitsChecked += 1
+                local ok, val = pcall(fruitValue, fruit, plot)
+                val = ok and (tonumber(val) or 0) or 0
                 if val <= 0 then continue end
                 local seed = fruitSeedName(fruit)
                 if not best or val > best.value then
@@ -478,10 +607,15 @@ local function findBestFruit()
                         seed = seed,
                         display = fruitDisplayName(seed),
                         owner = owner,
+                        plotName = plot.Name,
                     }
                 end
             end
         end
+    end)
+    if best then
+        best.plotsScanned = plotsScanned
+        best.fruitsChecked = fruitsChecked
     end
     return best
 end
@@ -587,6 +721,13 @@ local function scanOnce()
     task.wait(MAP_WAIT)
 
     local pets = collectPets()
+
+    syncServerGardens()
+    local plotsBefore = countGardenPlotsWithPlants()
+    if plotsBefore <= 1 then
+        task.wait(1.5)
+        syncServerGardens()
+    end
     local best = findBestFruit()
 
     for _, pet in ipairs(pets) do fetchImageAsync(pet.species) end
@@ -600,7 +741,10 @@ local function scanOnce()
 
     local fruitOk = notifyFruit(best)
 
-    local fruitInfo = best and (best.display .. " " .. fmtNum(best.value) .. " @" .. best.owner) or "none"
+    local fruitInfo = best
+        and (best.display .. " " .. fmtNum(best.value) .. " @" .. best.owner
+            .. " | gardens:" .. tostring(best.plotsScanned or "?") .. " fruits:" .. tostring(best.fruitsChecked or "?"))
+        or "none"
     print("[NTMT HUB] scan | pets:", #pets, "sent:", petOk, "| fruit:", fruitInfo, "sent:", fruitOk and "yes" or "no")
     return petOk, #pets, fruitOk, best
 end
@@ -619,7 +763,16 @@ end
 
 local function markVisited(id)
     id = tostring(id or "")
-    if id ~= "" then visited[id] = os.time() saveVisited() end
+    if id ~= "" then
+        visited[id] = os.time()
+        local now = os.time()
+        local count = 0
+        for jid, ts in visited do
+            count += 1
+            if count > 200 or (now - ts) > 3600 then visited[jid] = nil end
+        end
+        saveVisited()
+    end
 end
 
 markVisited(game.JobId)
@@ -632,27 +785,60 @@ local function canHopTo(id)
 end
 
 local function hopServer()
-    local job = tostring(game.JobId)
-    local body = httpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100")
-    if not body then return false end
-    local ok, page = pcall(function() return S.HS:JSONDecode(body) end)
-    if not ok or not page or not page.data then return false end
+    if hoppingBusy then return false end
+    if os.clock() - lastHopAt < HOP_COOLDOWN then return false end
 
+    local job = tostring(game.JobId)
     local picks = {}
-    for _, s in page.data do
-        local id = tostring(s.id or "")
-        if id ~= "" and id ~= job and canHopTo(id) then
-            local playing = tonumber(s.playing) or 0
-            local maxP = tonumber(s.maxPlayers) or 50
-            if playing < maxP then picks[#picks + 1] = id end
+    local cursor = nil
+
+    for _ = 1, 3 do
+        local url = "https://games.roblox.com/v1/games/" .. game.PlaceId
+            .. "/servers/Public?sortOrder=Desc&limit=100"
+        if cursor and cursor ~= "" then
+            url = url .. "&cursor=" .. S.HS:UrlEncode(cursor)
         end
+        local body = httpGet(url)
+        if not body then break end
+        local ok, page = pcall(function() return S.HS:JSONDecode(body) end)
+        if not ok or not page or not page.data then break end
+
+        for _, s in page.data do
+            local id = tostring(s.id or "")
+            if id ~= "" and id ~= job and canHopTo(id) then
+                local playing = tonumber(s.playing) or 0
+                local maxP = tonumber(s.maxPlayers) or 50
+                if playing > MIN_PLAYERS and playing < maxP then
+                    picks[#picks + 1] = id
+                end
+            end
+        end
+
+        cursor = page.nextPageCursor
+        if #picks >= 20 or type(cursor) ~= "string" or cursor == "" then break end
+        task.wait(0.15)
     end
-    if #picks == 0 then return false end
+
+    if #picks == 0 then
+        warn("[NTMT HUB] no server with >", MIN_PLAYERS, "players")
+        return false
+    end
 
     local target = picks[math.random(1, #picks)]
     markVisited(target)
-    pcall(function()
+    hoppingBusy = true
+    lastHopAt = os.clock()
+
+    local teleOk = pcall(function()
         S.TS:TeleportToPlaceInstance(game.PlaceId, target, LP)
+    end)
+    if not teleOk then
+        hoppingBusy = false
+        return false
+    end
+
+    task.delay(12, function()
+        hoppingBusy = false
     end)
     return true
 end
@@ -677,11 +863,11 @@ end)
     end
 end
 
--- ===== ANTI AFK =====
+-- ===== ANTI AFK (gentle) =====
 LP.Idled:Connect(function()
     pcall(function()
         S.VU:CaptureController()
-        S.VU:ClickButton2(Vector2.new())
+        S.VU:ClickButton2(Vector2.new(0, 0))
     end)
 end)
 
@@ -694,13 +880,16 @@ do
     print("[NTMT HUB] HTTP:", #methods > 0 and table.concat(methods, ", ") or "NONE")
 end
 
-print("[NTMT HUB] running | scan -> wait", HOP_SECONDS, "s -> hop")
+print("[NTMT HUB] running | hop >", MIN_PLAYERS, "players | scan -> wait", HOP_SECONDS, "s -> hop")
 
 task.spawn(function()
     while true do
-        pcall(scanOnce)
+        safeRun("scanOnce", scanOnce)
         print("[NTMT HUB] waiting", HOP_SECONDS, "s before hop | job:", tostring(game.JobId))
         task.wait(HOP_SECONDS)
-        pcall(hopServer)
+        if not hoppingBusy then
+            safeRun("hopServer", hopServer)
+        end
+        task.wait(1)
     end
 end)
