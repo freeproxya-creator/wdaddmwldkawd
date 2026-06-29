@@ -31,6 +31,7 @@ local cloneref = cloneref or clonereference or function(o) return o end
 local visitedServers = {}
 local notifiedKeys = {}
 local thumbCache = {}
+local fruitImageCache = {}
 local hoppingBusy = false
 local lastHopTarget = ""
 local currentJobId = tostring(game.JobId)
@@ -228,6 +229,87 @@ local function formatJobTag()
     return "NTMT-HUB-" .. tostring(game.JobId)
 end
 
+local function formatJobTagWithServer()
+    return "NTMT-HUB-" .. tostring(game.JobId) .. " server"
+end
+
+local function camelToWikiTitle(name)
+    if type(name) ~= "string" or name == "" then return "Crop" end
+    local overrides = {
+        GreenBean = "Green_Bean",
+        DragonFruit = "Dragon_Fruit",
+        VenusFlyTrap = "Venus_Fly_Trap",
+        PoisonApple = "Poison_Apple",
+        VenomSpitter = "Venom_Spitter",
+        MoonBloom = "Moon_Bloom",
+        HypnoBloom = "Hypno_Bloom",
+        DragonsBreath = "Dragon's_Breath",
+        DragonBreath = "Dragon's_Breath",
+        BabyCactus = "Baby_Cactus",
+        HornedMelon = "Horned_Melon",
+        GlowMushroom = "Glow_Mushroom",
+        PoisonIvy = "Poison_Ivy",
+        GhostPepper = "Ghost_Pepper",
+        BriarRose = "Briar_Rose",
+        Sunflower = "Sunflower",
+        Romanesco = "Romanesco",
+    }
+    if overrides[name] then return overrides[name] end
+    return name:gsub("(%l)(%u)", "%1_%2")
+end
+
+local function getFruitImageUrl(fruitName)
+    if type(fruitName) ~= "string" or fruitName == "" then return nil end
+    if fruitImageCache[fruitName] then return fruitImageCache[fruitName] end
+
+    local info = SeedDataByName[fruitName]
+    if info then
+        for _, key in ipairs({ "Icon", "Image", "ImageId", "CropImage", "Thumbnail", "ThumbnailId" }) do
+            local url = assetIdToThumbUrl(info[key])
+            if url then
+                fruitImageCache[fruitName] = url
+                return url
+            end
+        end
+    end
+
+    local wikiTitle = camelToWikiTitle(fruitName)
+    local apiUrl = "https://growagarden2.fandom.com/api/v1/Article?titles="
+        .. Services.HttpService:UrlEncode(wikiTitle)
+    local body = universalHttpGet(apiUrl)
+    if body then
+        local ok, data = xpcall(function() return Services.HttpService:JSONDecode(body) end, noopErr)
+        if ok and type(data) == "table" and type(data.items) == "table" then
+            for _, item in pairs(data.items) do
+                local src = item.thumbnail and item.thumbnail.source
+                    or item.originalimage and item.originalimage.source
+                if type(src) == "string" and src ~= "" then
+                    fruitImageCache[fruitName] = src
+                    return src
+                end
+            end
+        end
+    end
+
+    body = universalHttpGet("https://growagarden2.fandom.com/wiki/" .. wikiTitle)
+    if body then
+        local og = body:match('<meta property="og:image" content="([^"]+)"')
+            or body:match('<meta content="([^"]+)" property="og:image"')
+        if og then
+            fruitImageCache[fruitName] = og
+            return og
+        end
+        local img = body:match("(https://static%.wikia%.nocookie%.net/growagarden2/images/[%w%-_%.%%/]+%.png)")
+            or body:match("(https://static%.wikia%.nocookie%.net/growagarden2/images/[%w%-_%.%%/]+%.webp)")
+        if img then
+            fruitImageCache[fruitName] = img
+            return img
+        end
+    end
+
+    return nil
+end
+
 local function getPetDisplayName(species, size)
     if not species then return "Unknown" end
     if PetData then
@@ -368,15 +450,21 @@ local function sendPetWebhook(entry)
     if wasNotified(notifyKey) then return false end
 
     local rarity = tostring(entry.rarity)
+    local jobLine = formatJobTagWithServer()
+    local desc = table.concat({
+        "** " .. rarity .. " pet has spawn **",
+        entry.displayName,
+        formatCompactNumber(entry.price) .. " sheckles",
+        entry.species,
+        "pc copy:",
+        "```" .. jobLine .. "```",
+        "mobile copy:",
+        "`" .. jobLine .. "`",
+    }, "\n")
+
     local embed = {
-        title = string.upper(rarity) .. " PET APPEARED",
-        description = entry.displayName .. "\n\nA rare pet has just appeared in the server!",
+        description = desc,
         color = RARITY_COLORS[rarity] or 0xFF4FD8,
-        fields = {
-            { name = "Rarity", value = "**" .. string.upper(rarity) .. "**", inline = true },
-            { name = "Price", value = formatCompactNumber(entry.price) .. " Sheckles", inline = true },
-            { name = "Job ID", value = formatJobTag(), inline = false },
-        },
         footer = {
             text = "made by NTMT HUB | " .. DISCORD_LINK .. " • " .. os.date("%d/%m/%Y %H:%M"),
         },
@@ -473,32 +561,35 @@ local function sendFruitWebhook(best)
     local notifyKey = buildFruitNotifyKey(best)
     if wasNotified(notifyKey) then return false end
 
+    local jobLine = formatJobTagWithServer()
     local desc = table.concat({
         "** FRUIT VALUE HIGHEST **",
         best.displayName,
         formatCompactNumber(best.value),
         best.fruitName,
         best.ownerName,
-        formatJobTag(),
+        "pc copy:",
+        "```" .. jobLine .. "```",
+        "mobile copy:",
+        "`" .. jobLine .. "`",
     }, "\n")
+
+    local embed = {
+        description = desc,
+        color = 0x22C55E,
+        footer = {
+            text = "made by NTMT HUB | " .. DISCORD_LINK .. " • " .. os.date("%d/%m/%Y %H:%M"),
+        },
+    }
+
+    local imageUrl = getFruitImageUrl(best.fruitName)
+    if imageUrl then
+        embed.thumbnail = { url = imageUrl }
+    end
 
     local ok = httpPost(FRUIT_WEBHOOK_URL, Services.HttpService:JSONEncode({
         username = "NTMT HUB",
-        embeds = {{
-            title = "FRUIT VALUE HIGHEST",
-            description = desc,
-            color = 0x22C55E,
-            fields = {
-                { name = "Fruit", value = best.displayName, inline = true },
-                { name = "Value", value = formatCompactNumber(best.value), inline = true },
-                { name = "Seed Key", value = tostring(best.fruitName), inline = true },
-                { name = "Garden Owner", value = tostring(best.ownerName), inline = true },
-                { name = "Job ID", value = formatJobTag(), inline = false },
-            },
-            footer = {
-                text = "made by NTMT HUB | " .. DISCORD_LINK .. " • " .. os.date("%d/%m/%Y %H:%M"),
-            },
-        }},
+        embeds = { embed },
     }))
     if ok then markNotified(notifyKey) end
     return ok
