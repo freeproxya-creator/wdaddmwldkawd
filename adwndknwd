@@ -1,14 +1,16 @@
---[[ NTMT HUB | OWNER PET SCANNER | GAG2 | made by nguoitinhmuathu ]]
-print("[NTMT HUB] OWNER PET SCANNER boot")
+--[[ NTMT HUB | OWNER SCANNER v2 | GAG2 | made by nguoitinhmuathu ]]
+print("[NTMT HUB] OWNER SCANNER v2 boot")
 
+-- ===== CONFIG =====
 local DISCORD_LINK = "https://discord.gg/MjjzMzaNR7"
-local PET_WEBHOOK_URL = "https://discord.com/api/webhooks/1520805797636866098/kSMvovb9-LpDr-MSVZt1f7wRvLKHbKW5RuZxlK8uRlYfJNIVKUGJRkEMROxQ6hDK204Q"
-local FRUIT_WEBHOOK_URL = "https://discord.com/api/webhooks/1521156031168909495/DWdM1vMNMGpQTDJOwKHQDS_J9t55e41A0S7LlCBY4SCSYoNo8iPo5KhvtCPTe1NmFpu-"
-local HOP_INTERVAL = 30
-local VISITED_REJOIN_AFTER = 240
+local PET_WEBHOOK = "https://discord.com/api/webhooks/1520805797636866098/kSMvovb9-LpDr-MSVZt1f7wRvLKHbKW5RuZxlK8uRlYfJNIVKUGJRkEMROxQ6hDK204Q"
+local FRUIT_WEBHOOK = "https://discord.com/api/webhooks/1521156031168909495/DWdM1vMNMGpQTDJOwKHQDS_J9t55e41A0S7LlCBY4SCSYoNo8iPo5KhvtCPTe1NmFpu-"
+local HOP_SECONDS = 30
+local MAP_WAIT = 5
+local REJOIN_COOLDOWN = 240
 local AUTO_EXEC_URL = ""
-local MAP_LOAD_WAIT = 4
 
+-- ===== GUARD =====
 local genv = _G
 if type(getgenv) == "function" then
     local ok, env = pcall(getgenv)
@@ -16,106 +18,41 @@ if type(getgenv) == "function" then
 elseif type(getgenv) == "table" then
     genv = getgenv
 end
-
-if genv.__NTMT_OWNER_SCANNER_RUNNING then
-    warn("[NTMT HUB] OWNER SCANNER already running")
+if genv.__NTMT_OWNER_SCANNER_V2 then
+    warn("[NTMT HUB] scanner v2 already running")
     return
 end
-genv.__NTMT_OWNER_SCANNER_RUNNING = true
+genv.__NTMT_OWNER_SCANNER_V2 = true
+genv.__NTMT_OWNER_SCANNER_RUNNING = nil
 
-local function noopErr(err)
-    return tostring(err or "")
-end
-
+local function errMsg(e) return tostring(e or "") end
 local cloneref = cloneref or clonereference or function(o) return o end
-local visitedServers = {}
-local notifiedKeys = {}
-local thumbCache = {}
-local fruitImageCache = {}
-local hoppingBusy = false
-local lastHopTarget = ""
-local currentJobId = tostring(game.JobId)
 
-if type(genv.ntmt_owner_visited) == "table" then
-    for jobId, ts in genv.ntmt_owner_visited do
-        if type(jobId) == "string" and type(ts) == "number" then
-            visitedServers[jobId] = ts
-        end
-    end
-end
--- notifiedKeys chi dung trong session, khong load tu genv (tranh block webhook)
-
-genv.ntmt_owner_notified = nil
-
-local RARITY_COLORS = {
-    Common = 0x9CA3AF,
-    Uncommon = 0x22C55E,
-    Rare = 0x3B82F6,
-    Epic = 0xA855F7,
-    Legendary = 0xEAB308,
-    Mythic = 0xEF4444,
-    Super = 0xFF4FD8,
+local S = {
+    Players = cloneref(game:GetService("Players")),
+    RS = cloneref(game:GetService("ReplicatedStorage")),
+    WS = cloneref(game:GetService("Workspace")),
+    CS = cloneref(game:GetService("CollectionService")),
+    TS = cloneref(game:GetService("TeleportService")),
+    HS = cloneref(game:GetService("HttpService")),
+    VU = cloneref(game:GetService("VirtualUser")),
 }
 
-local function syncStateToGenv()
-    genv.ntmt_owner_visited = visitedServers
-end
+local LP = S.Players.LocalPlayer or S.Players.PlayerAdded:Wait()
+repeat task.wait() until game:IsLoaded()
 
-local function isDiscordSafeImageUrl(url)
-    if type(url) ~= "string" or url == "" then return false end
-    if url:find("roblox%.com/asset") then return false end
-    return url:find("^https://") ~= nil
-end
-
-local webhookHttpWarned = false
-
-local function postDiscordWebhook(webhookUrl, embed)
-    local hs = game:GetService("HttpService")
-    local function trySend(data)
-        local ok, payload = xpcall(function()
-            return hs:JSONEncode({
-                username = "NTMT HUB",
-                embeds = { data },
-            })
-        end, noopErr)
-        if not ok or type(payload) ~= "string" then return false end
-        return httpPost(webhookUrl, payload)
-    end
-    if trySend(embed) then return true end
-    if embed.thumbnail then
-        local fallback = {
-            description = embed.description,
-            color = embed.color,
-            footer = embed.footer,
-        }
-        if trySend(fallback) then return true end
-    end
-    if type(embed.description) == "string" and embed.description ~= "" then
-        local ok, payload = xpcall(function()
-            return hs:JSONEncode({
-                username = "NTMT HUB",
-                content = embed.description,
-            })
-        end, noopErr)
-        if ok and type(payload) == "string" and httpPost(webhookUrl, payload) then return true end
-    end
-    if not webhookHttpWarned then
-        webhookHttpWarned = true
-        warn("[NTMT HUB] Webhook HTTP failed — executor can need request() or game:HttpPost")
-    end
-    return false
-end
-
-local function universalHttpGet(url)
-    if game and type(game.HttpGet) == "function" then
-        local ok, body = xpcall(function() return game:HttpGet(url) end, noopErr)
+-- ===== HTTP (same as main NTMT script) =====
+local function httpGet(url)
+    if type(game.HttpGet) == "function" then
+        local ok, body = pcall(function() return game:HttpGet(url) end)
         if ok and type(body) == "string" and #body > 0 then return body end
     end
     local req = (syn and syn.request) or (http and http.request) or http_request or request
     if type(req) == "function" then
-        local ok, res = xpcall(function() return req({ Url = url, Method = "GET" }) end, noopErr)
-        if ok and res and type(res.Body or res.body) == "string" and #(res.Body or res.body) > 0 then
-            return res.Body or res.body
+        local ok, res = pcall(function() return req({ Url = url, Method = "GET" }) end)
+        if ok and res then
+            local body = res.Body or res.body
+            if type(body) == "string" and #body > 0 then return body end
         end
     end
     return nil
@@ -123,424 +60,253 @@ end
 
 local function httpPost(url, body)
     if type(url) ~= "string" or url == "" or type(body) ~= "string" then return false end
-    local headers = { ["Content-Type"] = "application/json", ["content-type"] = "application/json" }
+    local headers = { ["Content-Type"] = "application/json" }
     local req = request or (syn and syn.request) or (http and http.request) or http_request
     if fluxus and fluxus.request then req = fluxus.request end
     if type(req) == "function" then
-        for _, opts in ipairs({
-            { Url = url, Method = "POST", Headers = headers, Body = body },
-            { url = url, method = "POST", headers = headers, body = body },
-        }) do
-            local ok, res = xpcall(function() return req(opts) end, noopErr)
-            if ok then
-                if res == true or res == nil then return true end
-                if type(res) == "table" then
-                    if res.Success == false or res.success == false then continue end
-                    local code = res.StatusCode or res.status or res.Status
-                    if type(code) == "number" then return code >= 200 and code < 400 end
-                end
-                return true
-            end
+        local ok, res = pcall(function()
+            return req({ Url = url, Method = "POST", Headers = headers, Body = body })
+        end)
+        if ok then
+            if res == true or res == nil then return true end
+            local code = res and (res.StatusCode or res.status or res.Status)
+            if type(code) == "number" then return code >= 200 and code < 400 end
+            return true
         end
     end
     if http and type(http.post) == "function" then
-        local ok = xpcall(function() http.post(url, body, "application/json") end, noopErr)
+        local ok = pcall(function() http.post(url, body, "application/json") end)
         if ok then return true end
     end
     if type(game.HttpPost) == "function" then
-        local ok, res = xpcall(function()
-            return game:HttpPost(url, body, Enum.HttpContentType.ApplicationJson, false)
-        end, noopErr)
-        if ok and (res == nil or res == true or (type(res) == "string" and #res > 0)) then return true end
-    end
-    local hs = game:GetService("HttpService")
-    if hs then
-        local ok, res = xpcall(function()
-            return hs:RequestAsync({ Url = url, Method = "POST", Headers = headers, Body = body })
-        end, noopErr)
-        if ok and type(res) == "table" then
-            if res.Success == true then return true end
-            if type(res.StatusCode) == "number" and res.StatusCode >= 200 and res.StatusCode < 400 then return true end
-        end
-        ok = xpcall(function()
-            hs:PostAsync(url, body, Enum.HttpContentType.ApplicationJson, false)
-        end, noopErr)
+        local ok = pcall(function()
+            game:HttpPost(url, body, Enum.HttpContentType.ApplicationJson, false)
+        end)
         if ok then return true end
     end
-    return false
+    local ok = pcall(function()
+        S.HS:PostAsync(url, body, Enum.HttpContentType.ApplicationJson, false)
+    end)
+    if ok then return true end
+    ok = pcall(function()
+        S.HS:RequestAsync({ Url = url, Method = "POST", Headers = headers, Body = body })
+    end)
+    return ok == true
 end
 
-local Services = {
-    Players = cloneref(game:GetService("Players")),
-    ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage")),
-    Workspace = cloneref(game:GetService("Workspace")),
-    CollectionService = cloneref(game:GetService("CollectionService")),
-    TeleportService = cloneref(game:GetService("TeleportService")),
-    HttpService = cloneref(game:GetService("HttpService")),
-    VirtualUser = cloneref(game:GetService("VirtualUser")),
+-- ===== WIKI IMAGES (growagarden2.fandom.com) =====
+local wikiImgCache = {}
+
+local WIKI_OVERRIDES = {
+    GreenBean = "Green_Bean", DragonFruit = "Dragon_Fruit", VenusFlyTrap = "Venus_Fly_Trap",
+    PoisonApple = "Poison_Apple", VenomSpitter = "Venom_Spitter", MoonBloom = "Moon_Bloom",
+    HypnoBloom = "Hypno_Bloom", DragonsBreath = "Dragon's_Breath", DragonBreath = "Dragon's_Breath",
+    BabyCactus = "Baby_Cactus", HornedMelon = "Horned_Melon", GlowMushroom = "Glow_Mushroom",
+    PoisonIvy = "Poison_Ivy", GhostPepper = "Ghost_Pepper", BriarRose = "Briar_Rose",
+    FireDragon = "Fire_Dragon", IceDragon = "Ice_Dragon", GoldenDragon = "Golden_Dragon",
+    RainbowButterfly = "Rainbow_Butterfly", HoneyBee = "Honey_Bee", PolarBear = "Polar_Bear",
 }
 
-local LocalPlayer = Services.Players.LocalPlayer or Services.Players.PlayerAdded:Wait()
-repeat task.wait() until game:IsLoaded()
-
-local function waitTag(tag, timeout)
-    timeout = timeout or 120
-    local deadline = os.clock() + timeout
-    while not Services.CollectionService:HasTag(LocalPlayer, tag) and os.clock() < deadline do
-        task.wait(0.2)
-    end
-end
-waitTag("DataLoaded", 120)
-
-local Shared = Services.ReplicatedStorage:WaitForChild("SharedModules", 60)
-local function safeRequire(mod)
-    if not mod then return nil end
-    local ok, res = xpcall(require, noopErr, mod)
-    return ok and res or nil
+local function toWikiTitle(key)
+    if type(key) ~= "string" or key == "" then return nil end
+    if WIKI_OVERRIDES[key] then return WIKI_OVERRIDES[key] end
+    return key:gsub("(%l)(%u)", "%1_%2")
 end
 
-local PetData = safeRequire(Services.ReplicatedStorage.SharedData:WaitForChild("PetData"))
-local FruitValueCalc = Shared and safeRequire(Shared:WaitForChild("FruitValueCalc"))
-local SeedData = Shared and safeRequire(Shared:WaitForChild("SeedData"))
-
-local Gardens = Services.Workspace:WaitForChild("Gardens", 120)
-
-local PetDataBySpecies = {}
-if type(PetData) == "table" then
-    for k, v in pairs(PetData) do
-        if type(k) == "string" and type(v) == "table" then
-            PetDataBySpecies[k] = v
+local function parseWikiImage(body)
+    if type(body) ~= "string" then return nil end
+    local ok, data = pcall(function() return S.HS:JSONDecode(body) end)
+    if ok and type(data) == "table" and type(data.items) == "table" then
+        for _, item in pairs(data.items) do
+            local src = item.thumbnail and item.thumbnail.source
+                or item.originalimage and item.originalimage.source
+            if type(src) == "string" and src:find("^https://") then return src end
         end
     end
+    local og = body:match('<meta property="og:image" content="([^"]+)"')
+        or body:match('<meta content="([^"]+)" property="og:image"')
+    if og and og:find("^https://") then return og end
+    return body:match("(https://static%.wikia%.nocookie%.net/growagarden2/images/[%w%-_%.%%/]+%.%a+)")
 end
 
-local SeedDataByName = {}
-if type(SeedData) == "table" then
-    for _, info in ipairs(SeedData) do
-        if type(info) == "table" and type(info.SeedName) == "string" then
-            SeedDataByName[info.SeedName] = info
-        end
+local function getWikiImage(key)
+    if type(key) ~= "string" or key == "" then return nil end
+    if wikiImgCache[key] ~= nil then
+        return wikiImgCache[key] ~= false and wikiImgCache[key] or nil
     end
-end
-
-local WildPetFolder, WildPetSpawns = nil, nil
-
-local function markVisited(jobId)
-    jobId = tostring(jobId or "")
-    if jobId ~= "" then
-        visitedServers[jobId] = os.time()
-        syncStateToGenv()
+    local title = toWikiTitle(key)
+    if not title then return nil end
+    local url = "https://growagarden2.fandom.com/api/v1/Article?titles=" .. S.HS:UrlEncode(title)
+    local img = parseWikiImage(httpGet(url))
+    if not img then
+        img = parseWikiImage(httpGet("https://growagarden2.fandom.com/wiki/" .. title))
     end
+    wikiImgCache[key] = img or false
+    return img
 end
 
-local function getVisitedAge(jobId)
-    local ts = visitedServers[tostring(jobId or "")]
-    if not ts then return nil end
-    return os.time() - ts
+-- ===== DISCORD =====
+local RARITY_COLOR = {
+    Common = 0x9CA3AF, Uncommon = 0x22C55E, Rare = 0x3B82F6, Epic = 0xA855F7,
+    Legendary = 0xEAB308, Mythic = 0xEF4444, Super = 0xFF4FD8,
+}
+
+local function footerText()
+    return "made by NTMT HUB | " .. DISCORD_LINK .. " • " .. os.date("%d/%m/%Y %H:%M")
 end
 
-local function isHopBlocked(jobId)
-    jobId = tostring(jobId or "")
-    if jobId == "" or jobId == currentJobId then return true end
-    local age = getVisitedAge(jobId)
-    return age ~= nil and age < VISITED_REJOIN_AFTER
-end
-
-local function isFreshServer(jobId)
-    return getVisitedAge(jobId) == nil
-end
-
-local function pruneNotifiedKeys()
-    local now = os.time()
-    for key, ts in notifiedKeys do
-        if now - ts > VISITED_REJOIN_AFTER then
-            notifiedKeys[key] = nil
-        end
-    end
-end
-
-local function wasNotified(key)
-    pruneNotifiedKeys()
-    return notifiedKeys[key] ~= nil
-end
-
-local function markNotified(key)
-    notifiedKeys[key] = os.time()
-end
-
-markVisited(currentJobId)
-
-local function formatCompactNumber(amount)
-    amount = math.floor(tonumber(amount) or 0)
-    if amount >= 1000000000 then
-        local v = math.floor(amount / 1000000000 * 10 + 0.5) / 10
-        return (v == math.floor(v) and string.format("%db", math.floor(v)) or string.format("%gb", v))
-    end
-    if amount >= 1000000 then
-        local v = math.floor(amount / 1000000 * 10 + 0.5) / 10
-        return (v == math.floor(v) and string.format("%dm", math.floor(v)) or string.format("%gm", v))
-    end
-    if amount >= 1000 then
-        local v = math.floor(amount / 1000 * 10 + 0.5) / 10
-        return (v == math.floor(v) and string.format("%dk", math.floor(v)) or string.format("%gk", v))
-    end
-    return tostring(amount)
-end
-
-local function formatJobTag()
-    return "NTMT-HUB-" .. tostring(game.JobId)
-end
-
-local function formatJobTagWithServer()
+local function jobLine()
     return "NTMT-HUB-" .. tostring(game.JobId) .. " server"
 end
 
-local function camelToWikiTitle(name)
-    if type(name) ~= "string" or name == "" then return "Crop" end
-    local overrides = {
-        GreenBean = "Green_Bean",
-        DragonFruit = "Dragon_Fruit",
-        VenusFlyTrap = "Venus_Fly_Trap",
-        PoisonApple = "Poison_Apple",
-        VenomSpitter = "Venom_Spitter",
-        MoonBloom = "Moon_Bloom",
-        HypnoBloom = "Hypno_Bloom",
-        DragonsBreath = "Dragon's_Breath",
-        DragonBreath = "Dragon's_Breath",
-        BabyCactus = "Baby_Cactus",
-        HornedMelon = "Horned_Melon",
-        GlowMushroom = "Glow_Mushroom",
-        PoisonIvy = "Poison_Ivy",
-        GhostPepper = "Ghost_Pepper",
-        BriarRose = "Briar_Rose",
-        Sunflower = "Sunflower",
-        Romanesco = "Romanesco",
+local function fmtNum(n)
+    n = math.floor(tonumber(n) or 0)
+    if n >= 1e9 then
+        local v = math.floor(n / 1e9 * 10 + 0.5) / 10
+        return v == math.floor(v) and (math.floor(v) .. "b") or (v .. "gb")
+    end
+    if n >= 1e6 then
+        local v = math.floor(n / 1e6 * 10 + 0.5) / 10
+        return v == math.floor(v) and (math.floor(v) .. "m") or (v .. "gm")
+    end
+    if n >= 1e3 then
+        local v = math.floor(n / 1e3 * 10 + 0.5) / 10
+        return v == math.floor(v) and (math.floor(v) .. "k") or (v .. "gk")
+    end
+    return tostring(n)
+end
+
+local function sendDiscord(webhookUrl, desc, color, thumbKey)
+    if type(webhookUrl) ~= "string" or webhookUrl == "" then return false end
+    local embed = {
+        description = desc,
+        color = color or 0xFF4FD8,
+        footer = { text = footerText() },
     }
-    if overrides[name] then return overrides[name] end
-    return name:gsub("(%l)(%u)", "%1_%2")
+    local img = thumbKey and getWikiImage(thumbKey)
+    if type(img) == "string" and img:find("^https://") and not img:find("roblox%.com") then
+        embed.thumbnail = { url = img }
+    end
+
+    local function post(data)
+        local ok, json = pcall(function()
+            return S.HS:JSONEncode({ username = "NTMT HUB", embeds = { data } })
+        end)
+        return ok and httpPost(webhookUrl, json)
+    end
+
+    if post(embed) then return true end
+    if embed.thumbnail then
+        embed.thumbnail = nil
+        if post(embed) then return true end
+    end
+    local ok, json = pcall(function()
+        return S.HS:JSONEncode({ username = "NTMT HUB", content = desc })
+    end)
+    return ok and httpPost(webhookUrl, json)
 end
 
-local function getFruitImageUrl(fruitName)
-    if type(fruitName) ~= "string" or fruitName == "" then return nil end
-    if fruitImageCache[fruitName] then return fruitImageCache[fruitName] end
+-- ===== GAME DATA =====
+while not S.CS:HasTag(LP, "DataLoaded") do task.wait(0.2) end
 
-    local info = SeedDataByName[fruitName]
-    if info then
-        for _, key in ipairs({ "Icon", "Image", "ImageId", "CropImage", "Thumbnail", "ThumbnailId" }) do
-            local url = assetIdToThumbUrl(info[key])
-            if url then
-                fruitImageCache[fruitName] = url
-                return url
-            end
-        end
-    end
-
-    local wikiTitle = camelToWikiTitle(fruitName)
-    local apiUrl = "https://growagarden2.fandom.com/api/v1/Article?titles="
-        .. Services.HttpService:UrlEncode(wikiTitle)
-    local body = universalHttpGet(apiUrl)
-    if body then
-        local ok, data = xpcall(function() return Services.HttpService:JSONDecode(body) end, noopErr)
-        if ok and type(data) == "table" and type(data.items) == "table" then
-            for _, item in pairs(data.items) do
-                local src = item.thumbnail and item.thumbnail.source
-                    or item.originalimage and item.originalimage.source
-                if type(src) == "string" and src ~= "" then
-                    fruitImageCache[fruitName] = src
-                    return src
-                end
-            end
-        end
-    end
-
-    body = universalHttpGet("https://growagarden2.fandom.com/wiki/" .. wikiTitle)
-    if body then
-        local og = body:match('<meta property="og:image" content="([^"]+)"')
-            or body:match('<meta content="([^"]+)" property="og:image"')
-        if og then
-            fruitImageCache[fruitName] = og
-            return og
-        end
-        local img = body:match("(https://static%.wikia%.nocookie%.net/growagarden2/images/[%w%-_%.%%/]+%.png)")
-            or body:match("(https://static%.wikia%.nocookie%.net/growagarden2/images/[%w%-_%.%%/]+%.webp)")
-        if img then
-            fruitImageCache[fruitName] = img
-            return img
-        end
-    end
-
-    return nil
+local function safeRequire(m)
+    if not m then return nil end
+    local ok, r = pcall(require, m)
+    return ok and r or nil
 end
 
-local function getPetDisplayName(species, size)
-    if not species then return "Unknown" end
-    if PetData then
-        local ok, d = xpcall(PetData.GetDisplayName, noopErr, species, size)
-        if ok and type(d) == "string" then return d end
-        ok, d = xpcall(PetData.GetSpeciesDisplayName, noopErr, species)
-        if ok and type(d) == "string" then return d end
+local Shared = S.RS:WaitForChild("SharedModules", 60)
+local PetData = safeRequire(S.RS.SharedData:WaitForChild("PetData"))
+local FruitValueCalc = Shared and safeRequire(Shared:WaitForChild("FruitValueCalc"))
+local SeedData = Shared and safeRequire(Shared:WaitForChild("SeedData"))
+
+local Gardens = S.WS:WaitForChild("Gardens", 120)
+local WildPetRef, WildPetSpawns = nil, nil
+
+local PetBySpecies = {}
+if type(PetData) == "table" then
+    for k, v in pairs(PetData) do
+        if type(k) == "string" and type(v) == "table" then PetBySpecies[k] = v end
     end
-    return species
 end
 
-local function getPetRarity(species)
-    local d = PetDataBySpecies[species]
-    return (d and d.Rarity) or "Common"
-end
-
-local function parseAssetId(value)
-    if type(value) == "number" then return value end
-    if type(value) ~= "string" then return nil end
-    local fromAsset = value:match("rbxassetid://(%d+)")
-    if fromAsset then return tonumber(fromAsset) end
-    if value:match("^%d+$") then return tonumber(value) end
-    return nil
-end
-
-local function assetIdToThumbUrl(assetId)
-    assetId = parseAssetId(assetId)
-    if not assetId then return nil end
-    local cacheKey = tostring(assetId)
-    if thumbCache[cacheKey] then return thumbCache[cacheKey] end
-
-    local api = "https://thumbnails.roblox.com/v1/assets?assetIds="
-        .. assetId .. "&size=420x420&format=Png&isCircular=false"
-    local body = universalHttpGet(api)
-    if body then
-        local ok, data = xpcall(function() return Services.HttpService:JSONDecode(body) end, noopErr)
-        if ok and data and data.data and data.data[1] and data.data[1].imageUrl then
-            thumbCache[cacheKey] = data.data[1].imageUrl
-            return thumbCache[cacheKey]
+local SeedByName = {}
+if type(SeedData) == "table" then
+    for _, info in ipairs(SeedData) do
+        if type(info) == "table" and type(info.SeedName) == "string" then
+            SeedByName[info.SeedName] = info
         end
     end
-
-    local fallback = "https://www.roblox.com/asset-thumbnail/image?assetId="
-        .. assetId .. "&width=420&height=420&format=png"
-    thumbCache[cacheKey] = fallback
-    return nil
 end
 
-local function getPetImageUrl(species, model)
-    local d = PetDataBySpecies[species]
-    if d then
-        for _, key in ipairs({ "Icon", "Image", "ImageId", "IconImage", "Thumbnail", "ThumbnailId", "RenderImage", "PetIcon" }) do
-            local url = assetIdToThumbUrl(d[key])
-            if url then return url end
-        end
-    end
-    if PetData and type(PetData.GetIcon) == "function" then
-        local ok, icon = xpcall(PetData.GetIcon, noopErr, species)
-        local url = assetIdToThumbUrl(icon)
-        if url then return url end
-    end
-    if model then
-        for _, desc in model:GetDescendants() do
-            if desc:IsA("Decal") or desc:IsA("Texture") then
-                local url = assetIdToThumbUrl(desc.Texture)
-                if url then return url end
-            end
-            if desc:IsA("ImageLabel") or desc:IsA("ImageButton") then
-                local url = assetIdToThumbUrl(desc.Image)
-                if url then return url end
-            end
-        end
-    end
-    return nil
-end
-
-local function initMapFolders()
-    local map = Services.Workspace:FindFirstChild("Map")
+local function initMap()
+    local map = S.WS:FindFirstChild("Map")
     if map then
-        WildPetFolder = map:FindFirstChild("WildPetRef")
+        WildPetRef = map:FindFirstChild("WildPetRef")
         WildPetSpawns = map:FindFirstChild("WildPetSpawns")
     end
 end
 
-local function resolveRefFromModel(model)
-    if not model or not WildPetFolder then return nil end
-    local refName = string.match(model.Name, "^WildPet_.-_(.+)$")
-    local ref = refName and WildPetFolder:FindFirstChild(refName)
+local function petDisplayName(species, size)
+    if not species then return "Unknown" end
+    if PetData then
+        local ok, n = pcall(PetData.GetDisplayName, species, size)
+        if ok and type(n) == "string" then return n end
+        ok, n = pcall(PetData.GetSpeciesDisplayName, species)
+        if ok and type(n) == "string" then return n end
+    end
+    return species
+end
+
+local function petRarity(species)
+    local d = PetBySpecies[species]
+    return (d and d.Rarity) or "Common"
+end
+
+local function resolveRef(model)
+    if not model or not WildPetRef then return nil end
+    local refName = model.Name:match("^WildPet_.-_(.+)$")
+    local ref = refName and WildPetRef:FindFirstChild(refName)
     if ref and ref:IsA("BasePart") then return ref end
-    for _, ch in WildPetFolder:GetChildren() do
+    for _, ch in WildPetRef:GetChildren() do
         if ch:IsA("BasePart") and model.Name:find(ch.Name, 1, true) then return ch end
     end
     return nil
 end
 
-local function collectAllPets()
-    initMapFolders()
-    local seen, out = {}, {}
-    local function push(ref, model, species, size)
-        if not ref or not species then return end
+local function collectPets()
+    initMap()
+    local seen, list = {}, {}
+    local function add(ref, model)
+        if not ref then return end
+        local species = ref:GetAttribute("PetName") or (model and model:GetAttribute("PetName"))
+        if not species then return end
         local key = ref:GetFullName()
         if seen[key] then return end
         seen[key] = true
-        out[#out + 1] = {
+        local size = ref:GetAttribute("PetSize") or (model and model:GetAttribute("PetSize"))
+        list[#list + 1] = {
             species = species,
-            model = model,
-            refKey = key,
-            displayName = getPetDisplayName(species, size),
-            rarity = getPetRarity(species),
+            display = petDisplayName(species, size),
+            rarity = petRarity(species),
             price = ref:GetAttribute("Price") or (model and model:GetAttribute("Price")) or 0,
+            key = key,
         }
     end
-    if WildPetFolder then
-        for _, ref in WildPetFolder:GetChildren() do
-            if ref:IsA("BasePart") and ref.Parent then
-                push(ref, nil, ref:GetAttribute("PetName"), ref:GetAttribute("PetSize"))
-            end
+    if WildPetRef then
+        for _, ref in WildPetRef:GetChildren() do
+            if ref:IsA("BasePart") then add(ref, nil) end
         end
     end
     if WildPetSpawns then
         for _, model in WildPetSpawns:GetChildren() do
-            if model:IsA("Model") then
-                local ref = resolveRefFromModel(model)
-                push(ref, model, model:GetAttribute("PetName"), model:GetAttribute("PetSize"))
-            end
+            if model:IsA("Model") then add(resolveRef(model), model) end
         end
     end
-    return out
+    return list
 end
 
-local function buildNotifyKey(entry)
-    return tostring(game.JobId) .. "|" .. tostring(entry.refKey) .. "|" .. tostring(entry.species)
-end
-
-local function sendPetWebhook(entry)
-    local notifyKey = buildNotifyKey(entry)
-    if wasNotified(notifyKey) then return false end
-
-    local rarity = tostring(entry.rarity)
-    local jobLine = formatJobTagWithServer()
-    local desc = table.concat({
-        "** " .. rarity .. " pet has spawn **",
-        entry.displayName,
-        formatCompactNumber(entry.price) .. " sheckles",
-        entry.species,
-        "pc copy:",
-        "```" .. jobLine .. "```",
-        "mobile copy:",
-        "`" .. jobLine .. "`",
-    }, "\n")
-
-    local embed = {
-        description = desc,
-        color = RARITY_COLORS[rarity] or 0xFF4FD8,
-        footer = {
-            text = "made by NTMT HUB | " .. DISCORD_LINK .. " • " .. os.date("%d/%m/%Y %H:%M"),
-        },
-    }
-    local imageUrl = getPetImageUrl(entry.species, entry.model)
-    if isDiscordSafeImageUrl(imageUrl) then
-        embed.thumbnail = { url = imageUrl }
-    end
-
-    local ok = postDiscordWebhook(PET_WEBHOOK_URL, embed)
-    if ok then markNotified(notifyKey) end
-    return ok
-end
-
-local function getFruitStealName(fruit)
+local function fruitSeedName(fruit)
     if not fruit then return nil end
     return fruit:GetAttribute("CorePartName")
         or fruit:GetAttribute("PlantName")
@@ -549,60 +315,58 @@ local function getFruitStealName(fruit)
         or fruit.Name
 end
 
-local function getFruitDisplayName(fruitName)
-    if not fruitName then return "Unknown" end
-    local info = SeedDataByName[fruitName]
+local function fruitDisplayName(seedName)
+    local info = seedName and SeedByName[seedName]
     if info then
         if type(info.DisplayName) == "string" and info.DisplayName ~= "" then return info.DisplayName end
         if type(info.SeedDisplayName) == "string" and info.SeedDisplayName ~= "" then return info.SeedDisplayName end
     end
-    return fruitName
+    return seedName or "Unknown"
 end
 
-local function calculateFruitValue(fruit)
+local function fruitValue(fruit)
     if not fruit or not FruitValueCalc then return 0 end
-    local name = getFruitStealName(fruit)
+    local name = fruitSeedName(fruit)
     if not name then return 0 end
-    local size = fruit:GetAttribute("SizeMulti") or fruit:GetAttribute("Age")
-    local mut = fruit:GetAttribute("Mutation")
-    local ok, val = xpcall(FruitValueCalc, noopErr, name, size, mut, LocalPlayer, 1)
+    local ok, val = pcall(FruitValueCalc, name,
+        fruit:GetAttribute("SizeMulti") or fruit:GetAttribute("Age"),
+        fruit:GetAttribute("Mutation"), LP, 1)
     return ok and (tonumber(val) or 0) or 0
 end
 
-local function getPlotOwnerName(plot)
+local function plotOwner(plot)
     if not plot then return "Unknown" end
-    local ownerName = plot:GetAttribute("Owner")
-    if type(ownerName) == "string" and ownerName ~= "" then return ownerName end
-    local ownerId = plot:GetAttribute("OwnerUserId")
-    if ownerId ~= nil then
-        local uid = tonumber(ownerId) or ownerId
-        local plr = Services.Players:GetPlayerByUserId(uid)
+    local owner = plot:GetAttribute("Owner")
+    if type(owner) == "string" and owner ~= "" then return owner end
+    local uid = plot:GetAttribute("OwnerUserId")
+    if uid then
+        local plr = S.Players:GetPlayerByUserId(tonumber(uid) or uid)
         if plr then return plr.Name end
     end
     return "Unknown"
 end
 
-local function findHighestValueFruit()
+local function findBestFruit()
     if not Gardens then return nil end
-    local best = nil
+    local best
     for _, plot in Gardens:GetChildren() do
         local plants = plot:FindFirstChild("Plants")
         if not plants then continue end
-        local ownerName = getPlotOwnerName(plot)
+        local owner = plotOwner(plot)
         for _, plant in plants:GetChildren() do
-            local fruitsFolder = plant:FindFirstChild("Fruits")
-            local scanList = fruitsFolder and fruitsFolder:GetChildren() or { plant }
-            for _, fruit in scanList do
+            local fruits = plant:FindFirstChild("Fruits")
+            local scan = fruits and fruits:GetChildren() or { plant }
+            for _, fruit in scan do
                 if not fruit or not fruit.Parent then continue end
-                local value = calculateFruitValue(fruit)
-                if value <= 0 then continue end
-                local fruitName = getFruitStealName(fruit)
-                if not best or value > best.value then
+                local val = fruitValue(fruit)
+                if val <= 0 then continue end
+                local seed = fruitSeedName(fruit)
+                if not best or val > best.value then
                     best = {
-                        value = value,
-                        fruitName = fruitName,
-                        displayName = getFruitDisplayName(fruitName),
-                        ownerName = ownerName,
+                        value = val,
+                        seed = seed,
+                        display = fruitDisplayName(seed),
+                        owner = owner,
                     }
                 end
             end
@@ -611,236 +375,180 @@ local function findHighestValueFruit()
     return best
 end
 
-local function buildFruitNotifyKey(best)
-    return tostring(game.JobId) .. "|fruitHighest|" .. tostring(best.fruitName) .. "|" .. tostring(best.value)
+-- ===== NOTIFY (per server, no persistent cache) =====
+local sentThisServer = {}
+local currentJob = tostring(game.JobId)
+
+local function resetIfNewServer()
+    local j = tostring(game.JobId)
+    if j ~= currentJob then
+        table.clear(sentThisServer)
+        currentJob = j
+    end
 end
 
-local function sendFruitWebhook(best)
-    if not best or (best.value or 0) <= 0 then return false end
-    local notifyKey = buildFruitNotifyKey(best)
-    if wasNotified(notifyKey) then return false end
+local function alreadySent(key)
+    return sentThisServer[key] == true
+end
 
-    local jobLine = formatJobTagWithServer()
+local function markSent(key)
+    sentThisServer[key] = true
+end
+
+local function notifyPet(pet)
+    local key = currentJob .. "|pet|" .. pet.key
+    if alreadySent(key) then return false end
+    local jl = jobLine()
+    local desc = table.concat({
+        "** " .. pet.rarity .. " pet has spawn **",
+        pet.display,
+        fmtNum(pet.price) .. " sheckles",
+        "pc copy:",
+        "```" .. jl .. "```",
+        "mobile copy:",
+        "`" .. jl .. "`",
+    }, "\n")
+    local ok = sendDiscord(PET_WEBHOOK, desc, RARITY_COLOR[pet.rarity] or 0xFF4FD8, pet.species)
+    if ok then markSent(key) end
+    return ok
+end
+
+local function notifyFruit(best)
+    if not best or best.value <= 0 then return false end
+    local key = currentJob .. "|fruit|" .. tostring(best.seed) .. "|" .. tostring(best.value)
+    if alreadySent(key) then return false end
+    local jl = jobLine()
     local desc = table.concat({
         "** FRUIT VALUE HIGHEST **",
-        best.displayName,
-        formatCompactNumber(best.value),
-        best.fruitName,
-        best.ownerName,
+        best.display,
+        fmtNum(best.value),
+        best.owner,
+        best.seed or "Unknown",
         "pc copy:",
-        "```" .. jobLine .. "```",
+        "```" .. jl .. "```",
         "mobile copy:",
-        "`" .. jobLine .. "`",
+        "`" .. jl .. "`",
     }, "\n")
-
-    local embed = {
-        description = desc,
-        color = 0x22C55E,
-        footer = {
-            text = "made by NTMT HUB | " .. DISCORD_LINK .. " • " .. os.date("%d/%m/%Y %H:%M"),
-        },
-    }
-
-    local imageUrl = getFruitImageUrl(best.fruitName)
-    if isDiscordSafeImageUrl(imageUrl) then
-        embed.thumbnail = { url = imageUrl }
-    end
-
-    local ok = postDiscordWebhook(FRUIT_WEBHOOK_URL, embed)
-    if ok then markNotified(notifyKey) end
+    local ok = sendDiscord(FRUIT_WEBHOOK, desc, 0x22C55E, best.seed)
+    if ok then markSent(key) end
     return ok
 end
 
-local function scanFruitAndNotify()
-    local best = findHighestValueFruit()
-    if not best then return false, nil end
-    return sendFruitWebhook(best), best
-end
+local function scanOnce()
+    resetIfNewServer()
+    initMap()
+    task.wait(MAP_WAIT)
 
-local function scanPetsAndNotify()
-    local pets = collectAllPets()
-    local sent = 0
-    for _, entry in ipairs(pets) do
-        if sendPetWebhook(entry) then
-            sent += 1
-        end
-        task.wait(0.12)
+    local pets = collectPets()
+    local petOk = 0
+    for _, pet in ipairs(pets) do
+        if notifyPet(pet) then petOk += 1 end
+        task.wait(0.15)
     end
-    return sent, #pets
+
+    local best = findBestFruit()
+    local fruitOk = notifyFruit(best)
+
+    local fruitInfo = best and (best.display .. " " .. fmtNum(best.value) .. " @" .. best.owner) or "none"
+    print("[NTMT HUB] scan | pets:", #pets, "sent:", petOk, "| fruit:", fruitInfo, "sent:", fruitOk and "yes" or "no")
+    return petOk, #pets, fruitOk, best
 end
 
-local function scanServerAndNotify()
-    initMapFolders()
-    task.wait(MAP_LOAD_WAIT)
-    local petSent, petTotal = 0, 0
-    local fruitSent, bestFruit = false, nil
-    xpcall(function()
-        petSent, petTotal = scanPetsAndNotify()
-    end, noopErr)
-    xpcall(function()
-        fruitSent, bestFruit = scanFruitAndNotify()
-    end, noopErr)
-    return petSent, petTotal, fruitSent, bestFruit
-end
-
-local function fetchPublicServerPage(cursor)
-    local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
-    if cursor and cursor ~= "" then
-        url = url .. "&cursor=" .. Services.HttpService:UrlEncode(cursor)
+-- ===== HOP =====
+local visited = {}
+if type(genv.ntmt_owner_visited) == "table" then
+    for id, ts in genv.ntmt_owner_visited do
+        if type(id) == "string" and type(ts) == "number" then visited[id] = ts end
     end
-    local body = universalHttpGet(url)
-    if not body then return nil end
-    local ok, data = xpcall(function() return Services.HttpService:JSONDecode(body) end, noopErr)
-    return ok and data or nil
 end
 
-local function collectHopCandidates()
-    local current = currentJobId
-    local fresh, rejoin, seen = {}, {}, {}
-    local cursor = nil
+local function saveVisited()
+    genv.ntmt_owner_visited = visited
+end
 
-    for _ = 1, 20 do
-        local page = fetchPublicServerPage(cursor)
-        if not page or type(page.data) ~= "table" then break end
+local function markVisited(id)
+    id = tostring(id or "")
+    if id ~= "" then visited[id] = os.time() saveVisited() end
+end
 
-        for _, s in page.data do
-            local id = tostring(s.id or "")
-            if id == "" or id == current or seen[id] or id == lastHopTarget then continue end
-            if isHopBlocked(id) then continue end
+markVisited(game.JobId)
+
+local function canHopTo(id)
+    id = tostring(id)
+    if id == "" or id == tostring(game.JobId) then return false end
+    local ts = visited[id]
+    return not ts or (os.time() - ts) >= REJOIN_COOLDOWN
+end
+
+local function hopServer()
+    local job = tostring(game.JobId)
+    local body = httpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100")
+    if not body then return false end
+    local ok, page = pcall(function() return S.HS:JSONDecode(body) end)
+    if not ok or not page or not page.data then return false end
+
+    local picks = {}
+    for _, s in page.data do
+        local id = tostring(s.id or "")
+        if id ~= "" and id ~= job and canHopTo(id) then
             local playing = tonumber(s.playing) or 0
-            local maxPlayers = tonumber(s.maxPlayers) or 50
-            if playing >= maxPlayers then continue end
-            seen[id] = true
-
-            if isFreshServer(id) then
-                fresh[#fresh + 1] = id
-            else
-                local age = getVisitedAge(id)
-                if age and age >= VISITED_REJOIN_AFTER then
-                    rejoin[#rejoin + 1] = { id = id, age = age }
-                end
-            end
+            local maxP = tonumber(s.maxPlayers) or 50
+            if playing < maxP then picks[#picks + 1] = id end
         end
-
-        local nextCursor = page.nextPageCursor
-        if type(nextCursor) ~= "string" or nextCursor == "" or (#fresh + #rejoin) >= 50 then break end
-        cursor = nextCursor
     end
+    if #picks == 0 then return false end
 
-    local function shuffle(list)
-        for i = #list, 2, -1 do
-            local j = math.random(1, i)
-            list[i], list[j] = list[j], list[i]
-        end
-        return list
-    end
-
-    if #fresh > 0 then return shuffle(fresh) end
-
-    if #rejoin > 0 then
-        table.sort(rejoin, function(a, b) return a.age > b.age end)
-        local out = {}
-        for _, entry in ipairs(rejoin) do out[#out + 1] = entry.id end
-        return shuffle(out)
-    end
-
-    return {}
+    local target = picks[math.random(1, #picks)]
+    markVisited(target)
+    pcall(function()
+        S.TS:TeleportToPlaceInstance(game.PlaceId, target, LP)
+    end)
+    return true
 end
 
-local function hopToRandomServer()
-    if hoppingBusy then return false end
-    hoppingBusy = true
-    local ok = xpcall(function()
-        markVisited(currentJobId)
-        local candidates = collectHopCandidates()
-        if #candidates == 0 then return end
-
-        local pick = candidates[1]
-        lastHopTarget = pick
-        markVisited(pick)
-        syncStateToGenv()
-
-        local startJob = currentJobId
-        Services.TeleportService:TeleportToPlaceInstance(game.PlaceId, pick, LocalPlayer)
-
-        task.spawn(function()
-            for _ = 1, 24 do
-                task.wait(0.5)
-                local nowJob = tostring(game.JobId)
-                if nowJob ~= startJob then
-                    currentJobId = nowJob
-                    markVisited(nowJob)
-                    syncStateToGenv()
-                    break
-                end
-            end
-        end)
-    end, noopErr)
-    task.delay(3, function() hoppingBusy = false end)
-    return ok
-end
-
-local function setupAutoExecute()
-    if type(AUTO_EXEC_URL) ~= "string" or AUTO_EXEC_URL == "" then return end
-    local queueFn = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport)
-    if type(queueFn) ~= "function" then return end
-    local payload = string.format([[
+-- ===== AUTO EXEC =====
+if type(AUTO_EXEC_URL) == "string" and AUTO_EXEC_URL ~= "" then
+    local q = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport)
+    if type(q) == "function" then
+        local payload = string.format([[
 task.defer(function()
-    getgenv().__NTMT_OWNER_SCANNER_RUNNING = nil
+    getgenv().__NTMT_OWNER_SCANNER_V2 = nil
     local ok, src = pcall(function() return game:HttpGet(%q) end)
-    if ok and type(src) == "string" then loadstring(src, "NTMT_OWNER_SCAN")() end
+    if ok and type(src) == "string" then loadstring(src, "NTMT_OWNER_V2")() end
 end)
 ]], AUTO_EXEC_URL)
-    LocalPlayer.OnTeleport:Connect(function(state)
-        if state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress then
-            syncStateToGenv()
-            pcall(function() queueFn(payload) end)
-        end
-    end)
-end
-
-task.defer(function()
-    task.wait(1)
-    pcall(setupAutoExecute)
-end)
-
-local lastScanJobId = ""
-
-task.spawn(function()
-    while true do
-        currentJobId = tostring(game.JobId)
-        if currentJobId ~= lastScanJobId then
-            table.clear(notifiedKeys)
-            lastScanJobId = currentJobId
-        end
-        local petSent, petTotal, fruitSent, bestFruit = scanServerAndNotify()
-        local fruitInfo = bestFruit
-            and (bestFruit.displayName .. " " .. formatCompactNumber(bestFruit.value) .. " @" .. bestFruit.ownerName)
-            or "none"
-        print("[NTMT HUB] Server", currentJobId, "| pets:", petTotal, "sent:", petSent, "| best fruit:", fruitInfo, "sent:", fruitSent and "yes" or "no")
-        task.wait(HOP_INTERVAL)
-        if not hoppingBusy then
-            hopToRandomServer()
-        end
-    end
-end)
-
-LocalPlayer.Idled:Connect(function()
-    local vu = Services.VirtualUser
-    if vu then
-        pcall(function()
-            vu:CaptureController()
-            vu:ClickButton2(Vector2.new())
+        LP.OnTeleport:Connect(function(state)
+            if state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress then
+                saveVisited()
+                pcall(function() q(payload) end)
+            end
         end)
     end
+end
+
+-- ===== ANTI AFK =====
+LP.Idled:Connect(function()
+    pcall(function()
+        S.VU:CaptureController()
+        S.VU:ClickButton2(Vector2.new())
+    end)
 end)
 
-print("[NTMT HUB] OWNER SCANNER running | scan on join + hop every", HOP_INTERVAL, "s")
+-- ===== MAIN LOOP =====
 do
     local methods = {}
     if type(request) == "function" then methods[#methods + 1] = "request" end
-    if syn and type(syn.request) == "function" then methods[#methods + 1] = "syn.request" end
-    if http and type(http.request) == "function" then methods[#methods + 1] = "http.request" end
     if type(game.HttpPost) == "function" then methods[#methods + 1] = "game:HttpPost" end
-    print("[NTMT HUB] Webhook HTTP:", #methods > 0 and table.concat(methods, ", ") or "NONE — webhook se khong gui duoc")
+    if type(game.HttpGet) == "function" then methods[#methods + 1] = "game:HttpGet" end
+    print("[NTMT HUB] HTTP:", #methods > 0 and table.concat(methods, ", ") or "NONE")
 end
+
+print("[NTMT HUB] running | hop every", HOP_SECONDS, "s")
+
+task.spawn(function()
+    while true do
+        pcall(scanOnce)
+        task.wait(HOP_SECONDS)
+        pcall(hopServer)
+    end
+end)
