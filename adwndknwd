@@ -558,7 +558,7 @@ local function notifyFruit(best)
     if not best or best.value <= 0 then return false end
     if fruitSentForJob(currentJob) then return false end
 
-    local jl = "NTMT-HUB-" .. tostring(game.JobId) .. " server"
+    local jl = jobLine()
     local desc = table.concat({
         "** FRUIT HIGHEST VALUE FOR U TO STEAL **",
         "name fruit: " .. best.display,
