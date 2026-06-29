@@ -1,0 +1,535 @@
+--[[ NTMT HUB | OWNER PET SCANNER | GAG2 | made by nguoitinhmuathu ]]
+print("[NTMT HUB] OWNER PET SCANNER boot")
+
+local DISCORD_LINK = "https://discord.gg/MjjzMzaNR7"
+local WEBHOOK_URL = "https://discord.com/api/webhooks/1520805797636866098/kSMvovb9-LpDr-MSVZt1f7wRvLKHbKW5RuZxlK8uRlYfJNIVKUGJRkEMROxQ6hDK204Q"
+local HOP_INTERVAL = 15
+local VISITED_REJOIN_AFTER = 240
+local AUTO_EXEC_URL = ""
+local MAP_LOAD_WAIT = 3
+
+local genv = _G
+if type(getgenv) == "function" then
+    local ok, env = pcall(getgenv)
+    if ok and type(env) == "table" then genv = env end
+elseif type(getgenv) == "table" then
+    genv = getgenv
+end
+
+if genv.__NTMT_OWNER_SCANNER_RUNNING then
+    warn("[NTMT HUB] OWNER SCANNER already running")
+    return
+end
+genv.__NTMT_OWNER_SCANNER_RUNNING = true
+
+local function noopErr(err)
+    return tostring(err or "")
+end
+
+local cloneref = cloneref or clonereference or function(o) return o end
+local visitedServers = {}
+local notifiedKeys = {}
+local thumbCache = {}
+local hoppingBusy = false
+local lastHopTarget = ""
+local currentJobId = tostring(game.JobId)
+
+if type(genv.ntmt_owner_visited) == "table" then
+    for jobId, ts in genv.ntmt_owner_visited do
+        if type(jobId) == "string" and type(ts) == "number" then
+            visitedServers[jobId] = ts
+        end
+    end
+end
+if type(genv.ntmt_owner_notified) == "table" then
+    for key, ts in genv.ntmt_owner_notified do
+        if type(key) == "string" and type(ts) == "number" then
+            notifiedKeys[key] = ts
+        end
+    end
+end
+
+local RARITY_COLORS = {
+    Common = 0x9CA3AF,
+    Uncommon = 0x22C55E,
+    Rare = 0x3B82F6,
+    Epic = 0xA855F7,
+    Legendary = 0xEAB308,
+    Mythic = 0xEF4444,
+    Super = 0xFF4FD8,
+}
+
+local function syncStateToGenv()
+    genv.ntmt_owner_visited = visitedServers
+    genv.ntmt_owner_notified = notifiedKeys
+end
+
+local function universalHttpGet(url)
+    if game and type(game.HttpGet) == "function" then
+        local ok, body = xpcall(function() return game:HttpGet(url) end, noopErr)
+        if ok and type(body) == "string" and #body > 0 then return body end
+    end
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    if type(req) == "function" then
+        local ok, res = xpcall(function() return req({ Url = url, Method = "GET" }) end, noopErr)
+        if ok and res and type(res.Body or res.body) == "string" and #(res.Body or res.body) > 0 then
+            return res.Body or res.body
+        end
+    end
+    return nil
+end
+
+local function httpPost(url, body)
+    if type(url) ~= "string" or url == "" or type(body) ~= "string" then return false end
+    local headers = { ["Content-Type"] = "application/json", ["content-type"] = "application/json" }
+    local req = request or (syn and syn.request) or (http and http.request) or http_request
+    if fluxus and fluxus.request then req = fluxus.request end
+    if type(req) == "function" then
+        local ok, res = xpcall(function()
+            return req({ Url = url, Method = "POST", Headers = headers, Body = body })
+        end, noopErr)
+        if ok then
+            if res == true or res == nil then return true end
+            local code = res and (res.StatusCode or res.status or res.Status)
+            if type(code) == "number" then return code >= 200 and code < 400 end
+            return true
+        end
+    end
+    local hs = game:GetService("HttpService")
+    if hs then
+        local ok = xpcall(function()
+            hs:PostAsync(url, body, Enum.HttpContentType.ApplicationJson, false)
+        end, noopErr)
+        if ok then return true end
+    end
+    return false
+end
+
+local Services = {
+    Players = cloneref(game:GetService("Players")),
+    ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage")),
+    Workspace = cloneref(game:GetService("Workspace")),
+    CollectionService = cloneref(game:GetService("CollectionService")),
+    TeleportService = cloneref(game:GetService("TeleportService")),
+    HttpService = cloneref(game:GetService("HttpService")),
+    VirtualUser = cloneref(game:GetService("VirtualUser")),
+}
+
+local LocalPlayer = Services.Players.LocalPlayer or Services.Players.PlayerAdded:Wait()
+repeat task.wait() until game:IsLoaded()
+
+local function waitTag(tag, timeout)
+    timeout = timeout or 120
+    local deadline = os.clock() + timeout
+    while not Services.CollectionService:HasTag(LocalPlayer, tag) and os.clock() < deadline do
+        task.wait(0.2)
+    end
+end
+waitTag("DataLoaded", 120)
+
+local PetData = nil
+pcall(function()
+    PetData = require(Services.ReplicatedStorage.SharedData:WaitForChild("PetData"))
+end)
+
+local PetDataBySpecies = {}
+if type(PetData) == "table" then
+    for k, v in pairs(PetData) do
+        if type(k) == "string" and type(v) == "table" then
+            PetDataBySpecies[k] = v
+        end
+    end
+end
+
+local WildPetFolder, WildPetSpawns = nil, nil
+
+local function markVisited(jobId)
+    jobId = tostring(jobId or "")
+    if jobId ~= "" then
+        visitedServers[jobId] = os.time()
+        syncStateToGenv()
+    end
+end
+
+local function getVisitedAge(jobId)
+    local ts = visitedServers[tostring(jobId or "")]
+    if not ts then return nil end
+    return os.time() - ts
+end
+
+local function isHopBlocked(jobId)
+    jobId = tostring(jobId or "")
+    if jobId == "" or jobId == currentJobId then return true end
+    local age = getVisitedAge(jobId)
+    return age ~= nil and age < VISITED_REJOIN_AFTER
+end
+
+local function isFreshServer(jobId)
+    return getVisitedAge(jobId) == nil
+end
+
+local function pruneNotifiedKeys()
+    local now = os.time()
+    for key, ts in notifiedKeys do
+        if now - ts > VISITED_REJOIN_AFTER then
+            notifiedKeys[key] = nil
+        end
+    end
+end
+
+local function wasNotified(key)
+    pruneNotifiedKeys()
+    return notifiedKeys[key] ~= nil
+end
+
+local function markNotified(key)
+    notifiedKeys[key] = os.time()
+    syncStateToGenv()
+end
+
+markVisited(currentJobId)
+
+local function formatCompactNumber(amount)
+    amount = math.floor(tonumber(amount) or 0)
+    if amount >= 1000000000 then
+        local v = math.floor(amount / 1000000000 * 10 + 0.5) / 10
+        return (v == math.floor(v) and string.format("%db", math.floor(v)) or string.format("%gb", v))
+    end
+    if amount >= 1000000 then
+        local v = math.floor(amount / 1000000 * 10 + 0.5) / 10
+        return (v == math.floor(v) and string.format("%dm", math.floor(v)) or string.format("%gm", v))
+    end
+    if amount >= 1000 then
+        local v = math.floor(amount / 1000 * 10 + 0.5) / 10
+        return (v == math.floor(v) and string.format("%dk", math.floor(v)) or string.format("%gk", v))
+    end
+    return tostring(amount)
+end
+
+local function formatJobTag()
+    return "NTMT-HUB-" .. tostring(game.JobId) .. " server"
+end
+
+local function getPetDisplayName(species, size)
+    if not species then return "Unknown" end
+    if PetData then
+        local ok, d = xpcall(PetData.GetDisplayName, noopErr, species, size)
+        if ok and type(d) == "string" then return d end
+        ok, d = xpcall(PetData.GetSpeciesDisplayName, noopErr, species)
+        if ok and type(d) == "string" then return d end
+    end
+    return species
+end
+
+local function getPetRarity(species)
+    local d = PetDataBySpecies[species]
+    return (d and d.Rarity) or "Common"
+end
+
+local function parseAssetId(value)
+    if type(value) == "number" then return value end
+    if type(value) ~= "string" then return nil end
+    local fromAsset = value:match("rbxassetid://(%d+)")
+    if fromAsset then return tonumber(fromAsset) end
+    if value:match("^%d+$") then return tonumber(value) end
+    return nil
+end
+
+local function assetIdToThumbUrl(assetId)
+    assetId = parseAssetId(assetId)
+    if not assetId then return nil end
+    local cacheKey = tostring(assetId)
+    if thumbCache[cacheKey] then return thumbCache[cacheKey] end
+
+    local api = "https://thumbnails.roblox.com/v1/assets?assetIds="
+        .. assetId .. "&size=420x420&format=Png&isCircular=false"
+    local body = universalHttpGet(api)
+    if body then
+        local ok, data = xpcall(function() return Services.HttpService:JSONDecode(body) end, noopErr)
+        if ok and data and data.data and data.data[1] and data.data[1].imageUrl then
+            thumbCache[cacheKey] = data.data[1].imageUrl
+            return thumbCache[cacheKey]
+        end
+    end
+
+    local fallback = "https://www.roblox.com/asset-thumbnail/image?assetId="
+        .. assetId .. "&width=420&height=420&format=png"
+    thumbCache[cacheKey] = fallback
+    return fallback
+end
+
+local function getPetImageUrl(species, model)
+    local d = PetDataBySpecies[species]
+    if d then
+        for _, key in ipairs({ "Icon", "Image", "ImageId", "IconImage", "Thumbnail", "ThumbnailId", "RenderImage", "PetIcon" }) do
+            local url = assetIdToThumbUrl(d[key])
+            if url then return url end
+        end
+    end
+    if PetData and type(PetData.GetIcon) == "function" then
+        local ok, icon = xpcall(PetData.GetIcon, noopErr, species)
+        local url = assetIdToThumbUrl(icon)
+        if url then return url end
+    end
+    if model then
+        for _, desc in model:GetDescendants() do
+            if desc:IsA("Decal") or desc:IsA("Texture") then
+                local url = assetIdToThumbUrl(desc.Texture)
+                if url then return url end
+            end
+            if desc:IsA("ImageLabel") or desc:IsA("ImageButton") then
+                local url = assetIdToThumbUrl(desc.Image)
+                if url then return url end
+            end
+        end
+    end
+    return nil
+end
+
+local function initMapFolders()
+    local map = Services.Workspace:FindFirstChild("Map")
+    if map then
+        WildPetFolder = map:FindFirstChild("WildPetRef")
+        WildPetSpawns = map:FindFirstChild("WildPetSpawns")
+    end
+end
+
+local function resolveRefFromModel(model)
+    if not model or not WildPetFolder then return nil end
+    local refName = string.match(model.Name, "^WildPet_.-_(.+)$")
+    local ref = refName and WildPetFolder:FindFirstChild(refName)
+    if ref and ref:IsA("BasePart") then return ref end
+    for _, ch in WildPetFolder:GetChildren() do
+        if ch:IsA("BasePart") and model.Name:find(ch.Name, 1, true) then return ch end
+    end
+    return nil
+end
+
+local function collectAllPets()
+    initMapFolders()
+    local seen, out = {}, {}
+    local function push(ref, model, species, size)
+        if not ref or not species then return end
+        local key = ref:GetFullName()
+        if seen[key] then return end
+        seen[key] = true
+        out[#out + 1] = {
+            species = species,
+            model = model,
+            refKey = key,
+            displayName = getPetDisplayName(species, size),
+            rarity = getPetRarity(species),
+            price = ref:GetAttribute("Price") or (model and model:GetAttribute("Price")) or 0,
+            imageUrl = getPetImageUrl(species, model),
+        }
+    end
+    if WildPetFolder then
+        for _, ref in WildPetFolder:GetChildren() do
+            if ref:IsA("BasePart") and ref.Parent then
+                push(ref, nil, ref:GetAttribute("PetName"), ref:GetAttribute("PetSize"))
+            end
+        end
+    end
+    if WildPetSpawns then
+        for _, model in WildPetSpawns:GetChildren() do
+            if model:IsA("Model") then
+                local ref = resolveRefFromModel(model)
+                push(ref, model, model:GetAttribute("PetName"), model:GetAttribute("PetSize"))
+            end
+        end
+    end
+    return out
+end
+
+local function buildNotifyKey(entry)
+    return tostring(game.JobId) .. "|" .. tostring(entry.refKey) .. "|" .. tostring(entry.species)
+end
+
+local function sendPetWebhook(entry)
+    local notifyKey = buildNotifyKey(entry)
+    if wasNotified(notifyKey) then return false end
+
+    local rarity = tostring(entry.rarity)
+    local embed = {
+        title = string.upper(rarity) .. " PET APPEARED",
+        description = entry.displayName .. "\n\nA rare pet has just appeared in the server!",
+        color = RARITY_COLORS[rarity] or 0xFF4FD8,
+        fields = {
+            { name = "Rarity", value = "**" .. string.upper(rarity) .. "**", inline = true },
+            { name = "Price", value = formatCompactNumber(entry.price) .. " Sheckles", inline = true },
+            { name = "Job ID", value = formatJobTag(), inline = false },
+        },
+        footer = {
+            text = "made by NTMT HUB | " .. DISCORD_LINK .. " • " .. os.date("%d/%m/%Y %H:%M"),
+        },
+    }
+    if entry.imageUrl then
+        embed.thumbnail = { url = entry.imageUrl }
+    end
+
+    local ok = httpPost(WEBHOOK_URL, Services.HttpService:JSONEncode({
+        username = "NTMT HUB",
+        embeds = { embed },
+    }))
+    if ok then markNotified(notifyKey) end
+    return ok
+end
+
+local function scanAndNotify()
+    initMapFolders()
+    task.wait(MAP_LOAD_WAIT)
+    local pets = collectAllPets()
+    local sent = 0
+    for _, entry in ipairs(pets) do
+        if sendPetWebhook(entry) then
+            sent += 1
+        end
+        task.wait(0.12)
+    end
+    return sent, #pets
+end
+
+local function fetchPublicServerPage(cursor)
+    local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+    if cursor and cursor ~= "" then
+        url = url .. "&cursor=" .. Services.HttpService:UrlEncode(cursor)
+    end
+    local body = universalHttpGet(url)
+    if not body then return nil end
+    local ok, data = xpcall(function() return Services.HttpService:JSONDecode(body) end, noopErr)
+    return ok and data or nil
+end
+
+local function collectHopCandidates()
+    local current = currentJobId
+    local fresh, rejoin, seen = {}, {}, {}
+    local cursor = nil
+
+    for _ = 1, 20 do
+        local page = fetchPublicServerPage(cursor)
+        if not page or type(page.data) ~= "table" then break end
+
+        for _, s in page.data do
+            local id = tostring(s.id or "")
+            if id == "" or id == current or seen[id] or id == lastHopTarget then continue end
+            if isHopBlocked(id) then continue end
+            local playing = tonumber(s.playing) or 0
+            local maxPlayers = tonumber(s.maxPlayers) or 50
+            if playing >= maxPlayers then continue end
+            seen[id] = true
+
+            if isFreshServer(id) then
+                fresh[#fresh + 1] = id
+            else
+                local age = getVisitedAge(id)
+                if age and age >= VISITED_REJOIN_AFTER then
+                    rejoin[#rejoin + 1] = { id = id, age = age }
+                end
+            end
+        end
+
+        local nextCursor = page.nextPageCursor
+        if type(nextCursor) ~= "string" or nextCursor == "" or (#fresh + #rejoin) >= 50 then break end
+        cursor = nextCursor
+    end
+
+    local function shuffle(list)
+        for i = #list, 2, -1 do
+            local j = math.random(1, i)
+            list[i], list[j] = list[j], list[i]
+        end
+        return list
+    end
+
+    if #fresh > 0 then return shuffle(fresh) end
+
+    if #rejoin > 0 then
+        table.sort(rejoin, function(a, b) return a.age > b.age end)
+        local out = {}
+        for _, entry in ipairs(rejoin) do out[#out + 1] = entry.id end
+        return shuffle(out)
+    end
+
+    return {}
+end
+
+local function hopToRandomServer()
+    if hoppingBusy then return false end
+    hoppingBusy = true
+    local ok = xpcall(function()
+        markVisited(currentJobId)
+        local candidates = collectHopCandidates()
+        if #candidates == 0 then return end
+
+        local pick = candidates[1]
+        lastHopTarget = pick
+        markVisited(pick)
+        syncStateToGenv()
+
+        local startJob = currentJobId
+        Services.TeleportService:TeleportToPlaceInstance(game.PlaceId, pick, LocalPlayer)
+
+        task.spawn(function()
+            for _ = 1, 24 do
+                task.wait(0.5)
+                local nowJob = tostring(game.JobId)
+                if nowJob ~= startJob then
+                    currentJobId = nowJob
+                    markVisited(nowJob)
+                    syncStateToGenv()
+                    break
+                end
+            end
+        end)
+    end, noopErr)
+    task.delay(3, function() hoppingBusy = false end)
+    return ok
+end
+
+local function setupAutoExecute()
+    if type(AUTO_EXEC_URL) ~= "string" or AUTO_EXEC_URL == "" then return end
+    local queueFn = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport)
+    if type(queueFn) ~= "function" then return end
+    local payload = string.format([[
+task.defer(function()
+    getgenv().__NTMT_OWNER_SCANNER_RUNNING = nil
+    local ok, src = pcall(function() return game:HttpGet(%q) end)
+    if ok and type(src) == "string" then loadstring(src, "NTMT_OWNER_SCAN")() end
+end)
+]], AUTO_EXEC_URL)
+    LocalPlayer.OnTeleport:Connect(function(state)
+        if state == Enum.TeleportState.Started or state == Enum.TeleportState.InProgress then
+            syncStateToGenv()
+            pcall(function() queueFn(payload) end)
+        end
+    end)
+end
+
+task.defer(function()
+    task.wait(1)
+    pcall(setupAutoExecute)
+end)
+
+task.spawn(function()
+    while true do
+        currentJobId = tostring(game.JobId)
+        local sent, total = scanAndNotify()
+        print("[NTMT HUB] Server", currentJobId, "| pets:", total, "| webhook sent:", sent)
+        task.wait(HOP_INTERVAL)
+        if not hoppingBusy then
+            hopToRandomServer()
+        end
+    end
+end)
+
+LocalPlayer.Idled:Connect(function()
+    local vu = Services.VirtualUser
+    if vu then
+        pcall(function()
+            vu:CaptureController()
+            vu:ClickButton2(Vector2.new())
+        end)
+    end
+end)
+
+print("[NTMT HUB] OWNER PET SCANNER running | hop every", HOP_INTERVAL, "s")
