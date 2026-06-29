@@ -2,7 +2,8 @@
 print("[NTMT HUB] OWNER PET SCANNER boot")
 
 local DISCORD_LINK = "https://discord.gg/MjjzMzaNR7"
-local WEBHOOK_URL = "https://discord.com/api/webhooks/1520805797636866098/kSMvovb9-LpDr-MSVZt1f7wRvLKHbKW5RuZxlK8uRlYfJNIVKUGJRkEMROxQ6hDK204Q"
+local PET_WEBHOOK_URL = "https://discord.com/api/webhooks/1520805797636866098/kSMvovb9-LpDr-MSVZt1f7wRvLKHbKW5RuZxlK8uRlYfJNIVKUGJRkEMROxQ6hDK204Q"
+local FRUIT_WEBHOOK_URL = "https://discord.com/api/webhooks/1521156031168909495/DWdM1vMNMGpQTDJOwKHQDS_J9t55e41A0S7LlCBY4SCSYoNo8iPo5KhvtCPTe1NmFpu-"
 local HOP_INTERVAL = 30
 local VISITED_REJOIN_AFTER = 240
 local AUTO_EXEC_URL = ""
@@ -224,7 +225,7 @@ local function formatCompactNumber(amount)
 end
 
 local function formatJobTag()
-    return "NTMT-HUB-" .. tostring(game.JobId) .. " server"
+    return "NTMT-HUB-" .. tostring(game.JobId)
 end
 
 local function getPetDisplayName(species, size)
@@ -384,7 +385,7 @@ local function sendPetWebhook(entry)
         embed.thumbnail = { url = entry.imageUrl }
     end
 
-    local ok = httpPost(WEBHOOK_URL, Services.HttpService:JSONEncode({
+    local ok = httpPost(PET_WEBHOOK_URL, Services.HttpService:JSONEncode({
         username = "NTMT HUB",
         embeds = { embed },
     }))
@@ -481,7 +482,7 @@ local function sendFruitWebhook(best)
         formatJobTag(),
     }, "\n")
 
-    local ok = httpPost(WEBHOOK_URL, Services.HttpService:JSONEncode({
+    local ok = httpPost(FRUIT_WEBHOOK_URL, Services.HttpService:JSONEncode({
         username = "NTMT HUB",
         embeds = {{
             title = "FRUIT VALUE HIGHEST",
