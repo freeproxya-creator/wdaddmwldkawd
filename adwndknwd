@@ -244,7 +244,7 @@ local function fmtNum(n)
     n = math.floor(tonumber(n) or 0)
     if n >= 1e9 then
         local v = math.floor(n / 1e9 * 10 + 0.5) / 10
-        return (v == math.floor(v) and tostring(math.floor(v)) or tostring(v)) .. "b"
+        return (v == math.floor(v) and tostring(math.floor(v)) or tostring(v)) .. "bn"
     end
     if n >= 1e6 then
         local v = math.floor(n / 1e6 * 10 + 0.5) / 10
@@ -489,6 +489,16 @@ end
 -- ===== NOTIFY (per server, no persistent cache) =====
 local sentThisServer = {}
 local currentJob = tostring(game.JobId)
+if type(genv.ntmt_fruit_sent) ~= "table" then genv.ntmt_fruit_sent = {} end
+
+local function pruneFruitSentCache()
+    local now = os.time()
+    for jobId, ts in genv.ntmt_fruit_sent do
+        if type(ts) == "number" and now - ts >= REJOIN_COOLDOWN then
+            genv.ntmt_fruit_sent[jobId] = nil
+        end
+    end
+end
 
 local function resetIfNewServer()
     local j = tostring(game.JobId)
@@ -504,6 +514,22 @@ end
 
 local function markSent(key)
     sentThisServer[key] = true
+end
+
+local function fruitSentForJob(jobId)
+    pruneFruitSentCache()
+    jobId = tostring(jobId or "")
+    if jobId == "" then return false end
+    if sentThisServer[jobId .. "|fruit|"] then return true end
+    local ts = genv.ntmt_fruit_sent[jobId]
+    return type(ts) == "number" and os.time() - ts < REJOIN_COOLDOWN
+end
+
+local function markFruitSent(jobId)
+    jobId = tostring(jobId or "")
+    if jobId == "" then return end
+    sentThisServer[jobId .. "|fruit|"] = true
+    genv.ntmt_fruit_sent[jobId] = os.time()
 end
 
 local function notifyPet(pet)
@@ -530,24 +556,29 @@ end
 
 local function notifyFruit(best)
     if not best or best.value <= 0 then return false end
-    local key = currentJob .. "|fruit|" .. tostring(best.seed) .. "|" .. tostring(best.value)
-    if alreadySent(key) then return false end
+    if fruitSentForJob(currentJob) then return false end
+
     local jl = jobLine()
+    local desc = table.concat({
+        "** FRUIT HIGHEST VALUE FOR U TO STEAL **",
+        best.display,
+        fmtNum(best.value),
+        best.seed or "Unknown",
+        best.owner,
+        "pc copy:",
+        "```" .. jl .. "```",
+        "mobile copy:",
+        "`" .. jl .. "`",
+    }, "\n")
+
     local embed = attachImage({
-        description = "** FRUIT VALUE HIGHEST **",
+        description = desc,
         color = 0x22C55E,
-        fields = {
-            { name = best.display, value = "-", inline = true },
-            { name = best.seed or "Unknown", value = "-", inline = true },
-            { name = best.owner, value = "-", inline = true },
-            { name = fmtNum(best.value), value = "-", inline = true },
-            { name = "pc copy:", value = "```" .. jl .. "```", inline = true },
-            { name = "mobile copy:", value = "`" .. jl .. "`", inline = true },
-        },
     }, best.seed)
+
     local ok = sendDiscord(FRUIT_WEBHOOK, embed)
     if not ok then warn("[NTMT HUB] fruit webhook fail:", best.display) end
-    if ok then markSent(key) end
+    if ok then markFruitSent(currentJob) end
     return ok
 end
 
