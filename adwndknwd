@@ -558,13 +558,12 @@ local function notifyFruit(best)
     if not best or best.value <= 0 then return false end
     if fruitSentForJob(currentJob) then return false end
 
-    local jl = jobLine()
+    local jl = "NTMT-HUB-" .. tostring(game.JobId) .. " server"
     local desc = table.concat({
         "** FRUIT HIGHEST VALUE FOR U TO STEAL **",
-        best.display,
-        fmtNum(best.value),
-        best.seed or "Unknown",
-        best.owner,
+        "name fruit: " .. best.display,
+        "value of fruit: " .. fmtNum(best.value),
+        "garden owner username: " .. best.owner,
         "pc copy:",
         "```" .. jl .. "```",
         "mobile copy:",
