@@ -3,10 +3,10 @@ print("[NTMT HUB] OWNER PET SCANNER boot")
 
 local DISCORD_LINK = "https://discord.gg/MjjzMzaNR7"
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1520805797636866098/kSMvovb9-LpDr-MSVZt1f7wRvLKHbKW5RuZxlK8uRlYfJNIVKUGJRkEMROxQ6hDK204Q"
-local HOP_INTERVAL = 15
+local HOP_INTERVAL = 30
 local VISITED_REJOIN_AFTER = 240
 local AUTO_EXEC_URL = ""
-local MAP_LOAD_WAIT = 3
+local MAP_LOAD_WAIT = 2
 
 local genv = _G
 if type(getgenv) == "function" then
@@ -127,16 +127,33 @@ local function waitTag(tag, timeout)
 end
 waitTag("DataLoaded", 120)
 
-local PetData = nil
-pcall(function()
-    PetData = require(Services.ReplicatedStorage.SharedData:WaitForChild("PetData"))
-end)
+local Shared = Services.ReplicatedStorage:WaitForChild("SharedModules", 60)
+local function safeRequire(mod)
+    if not mod then return nil end
+    local ok, res = xpcall(require, noopErr, mod)
+    return ok and res or nil
+end
+
+local PetData = safeRequire(Services.ReplicatedStorage.SharedData:WaitForChild("PetData"))
+local FruitValueCalc = Shared and safeRequire(Shared:WaitForChild("FruitValueCalc"))
+local SeedData = Shared and safeRequire(Shared:WaitForChild("SeedData"))
+
+local Gardens = Services.Workspace:WaitForChild("Gardens", 120)
 
 local PetDataBySpecies = {}
 if type(PetData) == "table" then
     for k, v in pairs(PetData) do
         if type(k) == "string" and type(v) == "table" then
             PetDataBySpecies[k] = v
+        end
+    end
+end
+
+local SeedDataByName = {}
+if type(SeedData) == "table" then
+    for _, info in ipairs(SeedData) do
+        if type(info) == "table" and type(info.SeedName) == "string" then
+            SeedDataByName[info.SeedName] = info
         end
     end
 end
@@ -375,9 +392,124 @@ local function sendPetWebhook(entry)
     return ok
 end
 
-local function scanAndNotify()
-    initMapFolders()
-    task.wait(MAP_LOAD_WAIT)
+local function getFruitStealName(fruit)
+    if not fruit then return nil end
+    return fruit:GetAttribute("CorePartName")
+        or fruit:GetAttribute("PlantName")
+        or fruit:GetAttribute("FruitName")
+        or fruit:GetAttribute("SeedName")
+        or fruit.Name
+end
+
+local function getFruitDisplayName(fruitName)
+    if not fruitName then return "Unknown" end
+    local info = SeedDataByName[fruitName]
+    if info then
+        if type(info.DisplayName) == "string" and info.DisplayName ~= "" then return info.DisplayName end
+        if type(info.SeedDisplayName) == "string" and info.SeedDisplayName ~= "" then return info.SeedDisplayName end
+    end
+    return fruitName
+end
+
+local function calculateFruitValue(fruit)
+    if not fruit or not FruitValueCalc then return 0 end
+    local name = getFruitStealName(fruit)
+    if not name then return 0 end
+    local size = fruit:GetAttribute("SizeMulti") or fruit:GetAttribute("Age")
+    local mut = fruit:GetAttribute("Mutation")
+    local ok, val = xpcall(FruitValueCalc, noopErr, name, size, mut, LocalPlayer, 1)
+    return ok and (tonumber(val) or 0) or 0
+end
+
+local function getPlotOwnerName(plot)
+    if not plot then return "Unknown" end
+    local ownerName = plot:GetAttribute("Owner")
+    if type(ownerName) == "string" and ownerName ~= "" then return ownerName end
+    local ownerId = plot:GetAttribute("OwnerUserId")
+    if ownerId ~= nil then
+        local uid = tonumber(ownerId) or ownerId
+        local plr = Services.Players:GetPlayerByUserId(uid)
+        if plr then return plr.Name end
+    end
+    return "Unknown"
+end
+
+local function findHighestValueFruit()
+    if not Gardens then return nil end
+    local best = nil
+    for _, plot in Gardens:GetChildren() do
+        local plants = plot:FindFirstChild("Plants")
+        if not plants then continue end
+        local ownerName = getPlotOwnerName(plot)
+        for _, plant in plants:GetChildren() do
+            local fruitsFolder = plant:FindFirstChild("Fruits")
+            local scanList = fruitsFolder and fruitsFolder:GetChildren() or { plant }
+            for _, fruit in scanList do
+                if not fruit or not fruit.Parent then continue end
+                local value = calculateFruitValue(fruit)
+                if value <= 0 then continue end
+                local fruitName = getFruitStealName(fruit)
+                if not best or value > best.value then
+                    best = {
+                        value = value,
+                        fruitName = fruitName,
+                        displayName = getFruitDisplayName(fruitName),
+                        ownerName = ownerName,
+                    }
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function buildFruitNotifyKey(best)
+    return tostring(game.JobId) .. "|fruitHighest|" .. tostring(best.fruitName) .. "|" .. tostring(best.value)
+end
+
+local function sendFruitWebhook(best)
+    if not best or (best.value or 0) <= 0 then return false end
+    local notifyKey = buildFruitNotifyKey(best)
+    if wasNotified(notifyKey) then return false end
+
+    local desc = table.concat({
+        "** FRUIT VALUE HIGHEST **",
+        best.displayName,
+        formatCompactNumber(best.value),
+        best.fruitName,
+        best.ownerName,
+        formatJobTag(),
+    }, "\n")
+
+    local ok = httpPost(WEBHOOK_URL, Services.HttpService:JSONEncode({
+        username = "NTMT HUB",
+        embeds = {{
+            title = "FRUIT VALUE HIGHEST",
+            description = desc,
+            color = 0x22C55E,
+            fields = {
+                { name = "Fruit", value = best.displayName, inline = true },
+                { name = "Value", value = formatCompactNumber(best.value), inline = true },
+                { name = "Seed Key", value = tostring(best.fruitName), inline = true },
+                { name = "Garden Owner", value = tostring(best.ownerName), inline = true },
+                { name = "Job ID", value = formatJobTag(), inline = false },
+            },
+            footer = {
+                text = "made by NTMT HUB | " .. DISCORD_LINK .. " • " .. os.date("%d/%m/%Y %H:%M"),
+            },
+        }},
+    }))
+    if ok then markNotified(notifyKey) end
+    return ok
+end
+
+local function scanFruitAndNotify()
+    local best = findHighestValueFruit()
+    if not best then return false, nil end
+    return sendFruitWebhook(best), best
+end
+
+local function scanPetsAndNotify()
     local pets = collectAllPets()
     local sent = 0
     for _, entry in ipairs(pets) do
@@ -387,6 +519,14 @@ local function scanAndNotify()
         task.wait(0.12)
     end
     return sent, #pets
+end
+
+local function scanServerAndNotify()
+    initMapFolders()
+    task.wait(MAP_LOAD_WAIT)
+    local petSent, petTotal = scanPetsAndNotify()
+    local fruitSent, bestFruit = scanFruitAndNotify()
+    return petSent, petTotal, fruitSent, bestFruit
 end
 
 local function fetchPublicServerPage(cursor)
@@ -513,8 +653,11 @@ end)
 task.spawn(function()
     while true do
         currentJobId = tostring(game.JobId)
-        local sent, total = scanAndNotify()
-        print("[NTMT HUB] Server", currentJobId, "| pets:", total, "| webhook sent:", sent)
+        local petSent, petTotal, fruitSent, bestFruit = scanServerAndNotify()
+        local fruitInfo = bestFruit
+            and (bestFruit.displayName .. " " .. formatCompactNumber(bestFruit.value) .. " @" .. bestFruit.ownerName)
+            or "none"
+        print("[NTMT HUB] Server", currentJobId, "| pets:", petTotal, "sent:", petSent, "| best fruit:", fruitInfo, "sent:", fruitSent and "yes" or "no")
         task.wait(HOP_INTERVAL)
         if not hoppingBusy then
             hopToRandomServer()
@@ -532,4 +675,4 @@ LocalPlayer.Idled:Connect(function()
     end
 end)
 
-print("[NTMT HUB] OWNER PET SCANNER running | hop every", HOP_INTERVAL, "s")
+print("[NTMT HUB] OWNER SCANNER running | scan on join + hop every", HOP_INTERVAL, "s")
