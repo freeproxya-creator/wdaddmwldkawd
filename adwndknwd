@@ -5,9 +5,9 @@ print("[NTMT HUB] OWNER SCANNER v2 boot")
 local DISCORD_LINK = "https://discord.gg/MjjzMzaNR7"
 local PET_WEBHOOK = "https://discord.com/api/webhooks/1520805797636866098/kSMvovb9-LpDr-MSVZt1f7wRvLKHbKW5RuZxlK8uRlYfJNIVKUGJRkEMROxQ6hDK204Q"
 local FRUIT_WEBHOOK = "https://discord.com/api/webhooks/1521156031168909495/DWdM1vMNMGpQTDJOwKHQDS_J9t55e41A0S7LlCBY4SCSYoNo8iPo5KhvtCPTe1NmFpu-"
-local HOP_SECONDS = 10
-local MAP_WAIT = 1
-local WEBHOOK_GAP = 0.05
+local HOP_SECONDS = 15
+local MAP_WAIT = 3
+local WEBHOOK_GAP = 0.1
 local REJOIN_COOLDOWN = 240
 local AUTO_EXEC_URL = ""
 
@@ -89,10 +89,14 @@ local function httpPost(url, body)
         S.HS:PostAsync(url, body, Enum.HttpContentType.ApplicationJson, false)
     end)
     if ok then return true end
-    ok = pcall(function()
-        S.HS:RequestAsync({ Url = url, Method = "POST", Headers = headers, Body = body })
+    local ok2, res = pcall(function()
+        return S.HS:RequestAsync({ Url = url, Method = "POST", Headers = headers, Body = body })
     end)
-    return ok == true
+    if ok2 and type(res) == "table" then
+        if res.Success == true then return true end
+        if type(res.StatusCode) == "number" and res.StatusCode >= 200 and res.StatusCode < 400 then return true end
+    end
+    return false
 end
 
 -- ===== WIKI IMAGES (growagarden2.fandom.com) =====
@@ -209,10 +213,17 @@ local function getItemImage(key)
     return img
 end
 
-local function warmImages(keys)
-    for _, key in ipairs(keys) do
-        task.spawn(function() getItemImage(key) end)
-    end
+local function getCachedImage(key)
+    if type(key) ~= "string" or key == "" then return nil end
+    local ck = "img:" .. key
+    local v = wikiImgCache[ck]
+    if v and v ~= false then return v end
+    return nil
+end
+
+local function fetchImageAsync(key)
+    if type(key) ~= "string" or key == "" then return end
+    task.spawn(function() getItemImage(key) end)
 end
 
 -- ===== DISCORD =====
@@ -246,15 +257,29 @@ local function fmtNum(n)
     return tostring(n)
 end
 
-local ZW = "\u{200b}"
-
 local function attachImage(embed, imgKey)
-    local img = imgKey and getItemImage(imgKey)
+    local img = imgKey and getCachedImage(imgKey)
     if type(img) == "string" and img:find("^https://") and not img:find("roblox%.com/asset") then
-        embed.image = { url = img }
         embed.thumbnail = { url = img }
     end
     return embed
+end
+
+local function embedToText(embed)
+    local lines = {}
+    if type(embed.description) == "string" and embed.description ~= "" then
+        lines[#lines + 1] = embed.description
+    end
+    if type(embed.fields) == "table" then
+        for _, f in ipairs(embed.fields) do
+            if f.name and f.value and f.value ~= "-" then
+                lines[#lines + 1] = f.name .. " " .. f.value
+            elseif f.name then
+                lines[#lines + 1] = f.name
+            end
+        end
+    end
+    return table.concat(lines, "\n")
 end
 
 local function sendDiscord(webhookUrl, embed)
@@ -266,18 +291,26 @@ local function sendDiscord(webhookUrl, embed)
         local ok, json = pcall(function()
             return S.HS:JSONEncode({ username = "NTMT HUB", embeds = { data } })
         end)
-        return ok and httpPost(webhookUrl, json)
+        if not ok or type(json) ~= "string" then return false end
+        return httpPost(webhookUrl, json)
     end
 
+    local plain = embedToText(embed)
+
     if post(embed) then return true end
-    if embed.image or embed.thumbnail then
-        embed.image = nil
+    if embed.thumbnail then
         embed.thumbnail = nil
         if post(embed) then return true end
     end
-    if type(embed.description) == "string" and embed.description ~= "" then
+    local noFields = {
+        description = plain,
+        color = embed.color,
+        footer = embed.footer,
+    }
+    if post(noFields) then return true end
+    if plain ~= "" then
         local ok, json = pcall(function()
-            return S.HS:JSONEncode({ username = "NTMT HUB", content = embed.description })
+            return S.HS:JSONEncode({ username = "NTMT HUB", content = plain })
         end)
         return ok and httpPost(webhookUrl, json)
     end
@@ -490,6 +523,7 @@ local function notifyPet(pet)
         },
     }, pet.species)
     local ok = sendDiscord(PET_WEBHOOK, embed)
+    if not ok then warn("[NTMT HUB] pet webhook fail:", pet.display) end
     if ok then markSent(key) end
     return ok
 end
@@ -503,15 +537,16 @@ local function notifyFruit(best)
         description = "** FRUIT VALUE HIGHEST **",
         color = 0x22C55E,
         fields = {
-            { name = best.display, value = ZW, inline = true },
-            { name = best.seed or "Unknown", value = ZW, inline = true },
-            { name = best.owner, value = ZW, inline = true },
-            { name = fmtNum(best.value), value = ZW, inline = true },
+            { name = best.display, value = "-", inline = true },
+            { name = best.seed or "Unknown", value = "-", inline = true },
+            { name = best.owner, value = "-", inline = true },
+            { name = fmtNum(best.value), value = "-", inline = true },
             { name = "pc copy:", value = "```" .. jl .. "```", inline = true },
             { name = "mobile copy:", value = "`" .. jl .. "`", inline = true },
         },
     }, best.seed)
     local ok = sendDiscord(FRUIT_WEBHOOK, embed)
+    if not ok then warn("[NTMT HUB] fruit webhook fail:", best.display) end
     if ok then markSent(key) end
     return ok
 end
@@ -524,11 +559,8 @@ local function scanOnce()
     local pets = collectPets()
     local best = findBestFruit()
 
-    local warm = {}
-    for _, pet in ipairs(pets) do warm[#warm + 1] = pet.species end
-    if best and best.seed then warm[#warm + 1] = best.seed end
-    warmImages(warm)
-    task.wait(0.25)
+    for _, pet in ipairs(pets) do fetchImageAsync(pet.species) end
+    if best and best.seed then fetchImageAsync(best.seed) end
 
     local petOk = 0
     for _, pet in ipairs(pets) do
@@ -632,12 +664,13 @@ do
     print("[NTMT HUB] HTTP:", #methods > 0 and table.concat(methods, ", ") or "NONE")
 end
 
-print("[NTMT HUB] running | hop every", HOP_SECONDS, "s")
+print("[NTMT HUB] running | scan -> wait", HOP_SECONDS, "s -> hop")
 
 task.spawn(function()
     while true do
         pcall(scanOnce)
-        pcall(hopServer)
+        print("[NTMT HUB] waiting", HOP_SECONDS, "s before hop | job:", tostring(game.JobId))
         task.wait(HOP_SECONDS)
+        pcall(hopServer)
     end
 end)
